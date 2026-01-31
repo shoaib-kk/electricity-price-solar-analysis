@@ -219,6 +219,46 @@ def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, roll
     return df
 
 
+def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding=True, rolling_stats=True, lag: int = 288):
+    lag_cols = ["RRP_lag1", "RRP_lag12", "RRP_lag288", 
+                "TOTALDEMAND_lag1", "TOTALDEMAND_lag12", "TOTALDEMAND_lag288"]
+    if rolling_stats:
+        lag_cols.extend(["RRP_roll_std_12", "TOTALDEMAND_roll_std_12"])
+    
+    print("\n" + "=" * 70)
+    print("Engineering features for TRAIN...")
+    print("=" * 70)
+    train_final = feature_engineering(train_cleaned, long_term_sin_cos_encoding=long_term_encoding,
+                                       rolling_stats=rolling_stats)
+    
+    rows_before_train = len(train_final)
+    train_final = train_final.dropna(subset=lag_cols)
+    print(f"  Dropped {rows_before_train - len(train_final)} rows with NaN values from train")
+
+    print("\n" + "=" * 70)
+    print("Engineering features for TEST (using train history)...")
+    print("=" * 70)
+    # Take last 288 rows of cleaned train as history for test lags
+    train_history = train_cleaned.tail(lag)
+    
+    # Concatenate history + test
+    combined = pd.concat([train_history, test_cleaned])
+    
+    # Compute features on combined data, this way test lags all have values
+    combined_with_features = feature_engineering(combined, long_term_sin_cos_encoding=long_term_encoding,
+                                                  rolling_stats=rolling_stats)
+    
+    # Slice back to just test rows
+    test_final = combined_with_features.loc[test_cleaned.index]
+    
+    # Drop any remaining NaNs
+    rows_before_test = len(test_final)
+    test_final = test_final.dropna(subset=lag_cols)
+    print(f"Dropped {rows_before_test - len(test_final)} rows with NaN values from test")
+    
+    return train_final, test_final
+
+
 def main():
     file_path = "PRICE_AND_DEMAND_FULL_VIC1.csv"
     df = pd.read_csv(
@@ -238,21 +278,26 @@ def main():
     print(f"Test:  {test.index[0]} to {test.index[-1]} ({len(test)} rows)")
 
     print("\n" + "=" * 70)
-    print("Cleaning TRAIN set...")
+    print("Cleaning TRAIN set (without features)...")
     print("=" * 70)
-    train_cleaned = clean_data(train, apply_feature_engineering=True, long_term_encoding=True, rolling_stats=True)
+    train_cleaned = clean_data(train, apply_feature_engineering=False)
 
     print("\n" + "=" * 70)
-    print("Cleaning TEST set...")
+    print("Cleaning TEST set (without features)...")
     print("=" * 70)
-    test_cleaned = clean_data(test, apply_feature_engineering=True, long_term_encoding=True, rolling_stats=True)
+    test_cleaned = clean_data(test, apply_feature_engineering=False)
+
+    # Apply feature engineering with train history for test
+    train_final, test_final = prepare_train_test_features(train_cleaned, test_cleaned, 
+                                                           long_term_encoding=True, rolling_stats=True)
+
 
 
     print("\n" + "=" * 70)
     print("Saving cleaned datasets...")
     print("=" * 70)
-    train_cleaned.to_csv("CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv")
-    test_cleaned.to_csv("CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv")
+    train_final.to_csv("CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv")
+    test_final.to_csv("CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv")
     print("Saved: CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv")
     print("Saved: CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv")
 
@@ -267,3 +312,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# main is getting a bit too long 
