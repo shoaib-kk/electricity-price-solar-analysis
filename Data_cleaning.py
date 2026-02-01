@@ -201,7 +201,8 @@ def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, roll
 
     if apply_feature_engineering:
         print("\nStep 4: Engineering features...")
-        df = feature_engineering(df, long_term_sin_cos_encoding=long_term_encoding, rolling_stats=rolling_stats)
+        df = feature_engineering(df, long_term_sin_cos_encoding=long_term_encoding, 
+                                 rolling_stats=rolling_stats)
         
         # Drop rows with NaN values in lag/rolling features only (not entire dataframe)
         rows_before = len(df)
@@ -219,7 +220,8 @@ def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, roll
     return df
 
 
-def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding=True, rolling_stats=True, lag: int = 288):
+def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding = True,
+                                 rolling_stats = True, lag: int = 288):
     lag_cols = ["RRP_lag1", "RRP_lag12", "RRP_lag288", 
                 "TOTALDEMAND_lag1", "TOTALDEMAND_lag12", "TOTALDEMAND_lag288"]
     if rolling_stats:
@@ -258,18 +260,28 @@ def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding=
     
     return train_final, test_final
 
+def final_data_info(train_final: pd.DataFrame, test_final: pd.DataFrame):
+    print("\n" + "=" * 70)
+    print("Final data info:")
+    print("=" * 70)
+    print("TRAIN:")
+    print(train_final.info())
+    print("\nTEST:")
+    print(test_final.info())
 
-def main():
+def load_data(file_path: str) -> pd.DataFrame:
     file_path = "PRICE_AND_DEMAND_FULL_VIC1.csv"
     df = pd.read_csv(
         file_path, parse_dates=["SETTLEMENTDATE"], index_col="SETTLEMENTDATE"
     )
 
-    #print("=" * 70)
-    #print("Initial data info:")
-    #print("=" * 70)
-    #print(df.info())
-
+    print("=" * 70)
+    print("Initial data info:")
+    print("=" * 70)
+    print(df.info())
+    return df
+def split_and_clean_data(df):
+    
     print("\n" + "=" * 70)
     print("Splitting data (80% train, 20% test)...")
     print("=" * 70)
@@ -290,9 +302,9 @@ def main():
     # Apply feature engineering with train history for test
     train_final, test_final = prepare_train_test_features(train_cleaned, test_cleaned, 
                                                            long_term_encoding=True, rolling_stats=True)
+    return train_final, test_final
 
-
-
+def save_data(train_final: pd.DataFrame, test_final: pd.DataFrame):
     print("\n" + "=" * 70)
     print("Saving cleaned datasets...")
     print("=" * 70)
@@ -301,13 +313,12 @@ def main():
     print("Saved: CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv")
     print("Saved: CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv")
 
-    #print("\n" + "=" * 70)
-    #print("Final data info:")
-    #print("=" * 70)
-    #print("TRAIN:")
-    #print(train_final.info())
-    #print("\nTEST:")
-    #print(test_final.info())
+def main():
+    df = load_data("PRICE_AND_DEMAND_FULL_VIC1.csv")
+    train_final, test_final = split_and_clean_data(df)
+    save_data(train_final, test_final)
+    final_data_info(train_final, test_final)
+
 
 
 if __name__ == "__main__":
