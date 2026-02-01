@@ -13,12 +13,6 @@ import pytz
 # Create a timezone object for Melbourne, Australia
 MELB_TZ = pytz.timezone("Australia/Melbourne")
 
-
-class RetryableError(Exception):
-    """Raised for transient failures that should trigger a retry."""
-    pass
-
-
 def should_skip(file_path, temp_path, min_bytes):
     if temp_path.exists():
         print(f"Removing stale temp file: {temp_path.name}")
@@ -28,15 +22,74 @@ def should_skip(file_path, temp_path, min_bytes):
         return False
 
     size = file_path.stat().st_size
-    if size >= min_bytes:
-        print(f"File exists and looks OK ({size} bytes), skipping: {file_path.name}")
-        return True
+    if size < min_bytes:
+        print(f"Existing file too small ({size} bytes), re-downloading: {file_path.name}")
+        file_path.unlink(missing_ok=True)
+        return False
 
-    print(f"Existing file too small ({size} bytes), re-downloading: {file_path.name}")
+    #  now check that it actually reaches the end of the month it is supposed to cover. 
+    try:
+        parts = file_path.name.split("_")
+        # Expect format like PRICE_AND_DEMAND_YYYYMM_VIC1.csv
+        if len(parts) < 5:
+            raise ValueError
 
-    # unlink because you don't want to keep this incomplete file
-    file_path.unlink(missing_ok=True)
-    return False
+        yyyymm = parts[3]
+        if len(yyyymm) != 6 or not yyyymm.isdigit():
+            raise ValueError
+        
+        year = int(yyyymm[:4])
+        month = int(yyyymm[4:6])
+
+        # Determine expected end of month timestamp, and allow tolerance so that
+        # max_ts >= expected_end - 5 minutes.
+        if month == 12:
+            next_month_start = MELB_TZ.localize(datetime(year + 1, 1, 1))
+        else:
+            next_month_start = MELB_TZ.localize(datetime(year, month + 1, 1))
+
+        expected_end = next_month_start
+        tolerance = pd.Timedelta(minutes=5)
+
+        max_ts = None
+        for chunk in pd.read_csv(
+            file_path,
+            usecols=["SETTLEMENTDATE"],
+            parse_dates=["SETTLEMENTDATE"],
+            chunksize=200_000,
+        ):
+            if chunk.empty:
+                continue
+            chunk_max = chunk["SETTLEMENTDATE"].max()
+            max_ts = chunk_max if max_ts is None else max(max_ts, chunk_max)
+
+        if max_ts is None:
+            print(f"Existing file is empty, re-downloading: {file_path.name}")
+            file_path.unlink(missing_ok=True)
+            return False
+
+        # use melb timezone for comparison
+        if getattr(max_ts, "tzinfo", None) is None:
+            max_ts = MELB_TZ.localize(max_ts)
+        else:
+            max_ts = max_ts.tz_convert(MELB_TZ)
+
+        threshold = expected_end - tolerance
+        if max_ts < threshold:
+            print(
+                f"Existing file appears incomplete, last SETTLEMENTDATE {max_ts} < "
+                f"threshold {threshold} for month ending at {expected_end}, re-downloading: {file_path.name}"
+            )
+            file_path.unlink(missing_ok=True)
+            return False
+
+    # add more narrowed exceptions later on 
+    except (ValueError, KeyError) as e:
+        print("Couldn't verify existing file, re-downloading:", file_path.name)
+        return False
+
+    print(f"File exists skipping: {file_path.name}")
+    return True
 
 
 
@@ -45,9 +98,6 @@ def should_skip(file_path, temp_path, min_bytes):
 def read_write_data(r, filename, temp_path, file_path, min_bytes):
     r.raise_for_status()
 
-    content_type = r.headers.get("Content-Type", "").lower()
-    if "html" in content_type:
-        raise RetryableError(f"Content-Type is HTML: {filename}")
     
     temp_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -61,7 +111,7 @@ def read_write_data(r, filename, temp_path, file_path, min_bytes):
     if bytes_written < min_bytes:
         print(f"File too small ({bytes_written} bytes), retrying: {filename}")
         temp_path.unlink(missing_ok=True)
-        raise RetryableError(f"File too small ({bytes_written} bytes): {filename}")
+        raise ValueError(f"File too small ({bytes_written} bytes): {filename}")
 
     # Check if temp file is actually HTML
     with open(temp_path, "rb") as f:
@@ -69,15 +119,10 @@ def read_write_data(r, filename, temp_path, file_path, min_bytes):
         if b"<html" in first or b"<!doctype" in first:
             print(f"Response was HTML, not CSV: {filename}")
             temp_path.unlink(missing_ok=True)
-            raise RetryableError(f"Response was HTML, not CSV: {filename}")
+            raise ValueError(f"Response was HTML, not CSV: {filename}")
 
     temp_path.replace(file_path)
     return True
-
-
-def now_melbourne():
-    return datetime.now(MELB_TZ)
-
 
 
 def download_month(
@@ -106,7 +151,7 @@ def download_month(
             time.sleep(sleep_time)
             return True
             
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             # Don't retry non-retryable HTTP errors (404, 403, etc.)
             if isinstance(e, requests.exceptions.HTTPError):
                 status = e.response.status_code if e.response else None
@@ -171,7 +216,8 @@ def collect_data(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    current_dt = now_melbourne()
+    current_dt =  datetime.now(MELB_TZ)
+
     current_yyyymm = int(current_dt.strftime("%Y%m"))
     end_year = min(end_year, current_dt.year)
 
