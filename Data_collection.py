@@ -108,7 +108,7 @@ def download_month(
             
         except Exception as e:
             # Don't retry non-retryable HTTP errors (404, 403, etc.)
-            if isinstance(e, requests.exceptionsHTTPError):
+            if isinstance(e, requests.exceptions.HTTPError):
                 status = e.response.status_code if e.response else None
                 if status and 400 <= status < 500 and status != 429:
                     print(f"Non-retryable HTTP {status}: {filename}")
