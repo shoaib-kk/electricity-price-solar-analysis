@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import time_utils
 
 def shorten_time_increment(df, time_freq: int = 60) -> pd.DataFrame:
 
@@ -149,27 +150,34 @@ def feature_engineering(df, long_term_sin_cos_encoding: bool = True, rolling_sta
         df["Month_sin"] = np.sin(2 * np.pi * df["Month"] / 12)
         df["Month_cos"] = np.cos(2 * np.pi * df["Month"] / 12)
 
-    
-    df["RRP_lag1"] = df["RRP"].shift(1)
-    df["RRP_lag12"] = df["RRP"].shift(12)
-    df["RRP_lag288"] = df["RRP"].shift(288)
+    # Derive lag lengths from the DataFrame's time step instead of
+    # hard-coding 5-minute-based numbers. This way the same code
+    # works for 5min, 30min, hourly, etc.
+    step_minutes = time_utils.infer_step_minutes(df.index, fallback_minutes=5.0)
+    steps_per_hour = max(1, int(round(60.0 / step_minutes)))
+    steps_per_day = max(1, int(round(1440.0 / step_minutes)))
 
-    df["TOTALDEMAND_lag1"] = df["TOTALDEMAND"].shift(1)
-    df["TOTALDEMAND_lag12"] = df["TOTALDEMAND"].shift(12)
-    df["TOTALDEMAND_lag288"] = df["TOTALDEMAND"].shift(288)
+    df["RRP_lag_1step"] = df["RRP"].shift(1)
+    df["RRP_lag_1hour"] = df["RRP"].shift(steps_per_hour)
+    df["RRP_lag_1day"] = df["RRP"].shift(steps_per_day)
+
+    df["TOTALDEMAND_lag_1step"] = df["TOTALDEMAND"].shift(1)
+    df["TOTALDEMAND_lag_1hour"] = df["TOTALDEMAND"].shift(steps_per_hour)
+    df["TOTALDEMAND_lag_1day"] = df["TOTALDEMAND"].shift(steps_per_day)
 
     # could cause overfitting so make optional 
     if rolling_stats:
-        df["RRP_roll_mean_12"] = df["RRP"].rolling(window=12, min_periods=1).mean()
-        df["RRP_roll_std_12"] = df["RRP"].rolling(window=12, min_periods=1).std()
-        df["RRP_roll_min_12"] = df["RRP"].rolling(window=12, min_periods=1).min()
-        df["RRP_roll_max_12"] = df["RRP"].rolling(window=12, min_periods=1).max()
+        window = 12
+        df["RRP_roll_mean_12"] = df["RRP"].rolling(window=window, min_periods=window).mean()
+        df["RRP_roll_std_12"] = df["RRP"].rolling(window=window, min_periods=window).std()
+        df["RRP_roll_min_12"] = df["RRP"].rolling(window=window, min_periods=window).min()
+        df["RRP_roll_max_12"] = df["RRP"].rolling(window=window, min_periods=window).max()
 
         df["TOTALDEMAND_roll_mean_12"] = (
-            df["TOTALDEMAND"].rolling(window=12, min_periods=1).mean()
+            df["TOTALDEMAND"].rolling(window=window, min_periods=window).mean()
         )
         df["TOTALDEMAND_roll_std_12"] = (
-            df["TOTALDEMAND"].rolling(window=12, min_periods=1).std()
+            df["TOTALDEMAND"].rolling(window=window, min_periods=window).std()
         )
 
     return df
@@ -177,39 +185,49 @@ def feature_engineering(df, long_term_sin_cos_encoding: bool = True, rolling_sta
 
 def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, rolling_stats=True):
     df = df.copy()
-
+    print("Starting data cleaning...")
     # make the datetime column the index if not already
     if "SETTLEMENTDATE" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
         df = df.set_index("SETTLEMENTDATE")
 
     print(f"Starting shape: {df.shape}")
 
-    print("\nStep 1: Checking time index...")
 
     # ensure no duplicates and expected frequency
     df = check_time_index(df, expected_freq_minutes=5)
 
-    print("\nStep 2: Checking gaps and filling missing values...")
     df = check_gaps(
         df, rrp_ffill_limit=2, demand_interp_limit=4, expected_freq_minutes=5
     )
 
-    print("\nStep 3: Removing improbable values...")
     df = remove_improbable_values(
         df, rrp_bounds=(-1000, 15500), demand_bounds=(0, 20000)
     )
 
     if apply_feature_engineering:
-        print("\nStep 4: Engineering features...")
         df = feature_engineering(df, long_term_sin_cos_encoding=long_term_encoding, 
                                  rolling_stats=rolling_stats)
         
-        # Drop rows with NaN values in lag/rolling features only (not entire dataframe)
         rows_before = len(df)
-        lag_cols = ["RRP_lag1", "RRP_lag12", "RRP_lag288", 
-                    "TOTALDEMAND_lag1", "TOTALDEMAND_lag12", "TOTALDEMAND_lag288"]
+        lag_cols = [
+            "RRP_lag_1step",
+            "RRP_lag_1hour",
+            "RRP_lag_1day",
+            "TOTALDEMAND_lag_1step",
+            "TOTALDEMAND_lag_1hour",
+            "TOTALDEMAND_lag_1day",
+        ]
         if rolling_stats:
-            lag_cols.extend(["RRP_roll_std_12", "TOTALDEMAND_roll_std_12"])
+            lag_cols.extend(
+                [
+                    "RRP_roll_mean_12",
+                    "RRP_roll_std_12",
+                    "RRP_roll_min_12",
+                    "RRP_roll_max_12",
+                    "TOTALDEMAND_roll_mean_12",
+                    "TOTALDEMAND_roll_std_12",
+                ]
+            )
         
         df = df.dropna(subset=lag_cols)
         rows_dropped = rows_before - len(df)
@@ -222,8 +240,14 @@ def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, roll
 
 def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding = True,
                                  rolling_stats = True, lag: int = 288):
-    lag_cols = ["RRP_lag1", "RRP_lag12", "RRP_lag288", 
-                "TOTALDEMAND_lag1", "TOTALDEMAND_lag12", "TOTALDEMAND_lag288"]
+    lag_cols = [
+        "RRP_lag_1step",
+        "RRP_lag_1hour",
+        "RRP_lag_1day",
+        "TOTALDEMAND_lag_1step",
+        "TOTALDEMAND_lag_1hour",
+        "TOTALDEMAND_lag_1day",
+    ]
     if rolling_stats:
         lag_cols.extend(["RRP_roll_std_12", "TOTALDEMAND_roll_std_12"])
     
