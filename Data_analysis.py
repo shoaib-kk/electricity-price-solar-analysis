@@ -7,6 +7,7 @@ from statsmodels.tsa.stattools import adfuller
 import time
 import warnings
 import time_utils
+import metrics_utils
 
 
 def fit_arima(series: pd.Series, order: tuple, max_iterations: int = 50):
@@ -148,28 +149,14 @@ def baseline_TSA(df, p_value: int | None = None, q_value: int | None = None):
 def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> None:
     """Print simple MAE/RMSE/sMAPE metrics for a forecast."""
 
-    mae = float(np.mean(np.abs(y_true - y_pred)))
-    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    metrics = metrics_utils.compute_mae_rmse_smape(y_true, y_pred)
+    mae = metrics["mae"]
+    rmse = metrics["rmse"]
+    smape = metrics["smape"]
 
     # Cost-weighted MAE: weight errors by the absolute true price so that
     # mistakes made at very high prices count more than mistakes at low prices.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        weights = np.abs(y_true)
-        errors = np.abs(y_true - y_pred)
-        mask_weights = np.isfinite(weights) & np.isfinite(errors) & (weights > 0)
-        if mask_weights.any():
-            cost_weighted_mae = float(
-                np.sum(errors[mask_weights] * weights[mask_weights])
-                / np.sum(weights[mask_weights])
-            )
-        else:
-            cost_weighted_mae = np.nan
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        denom = np.abs(y_true) + np.abs(y_pred)
-        smape = 2.0 * np.abs(y_true - y_pred) / denom
-        smape = smape[np.isfinite(smape)]
-        smape = float(np.mean(smape)) * 100 if smape.size > 0 else np.nan
+    cost_weighted_mae = metrics_utils.compute_cost_weighted_mae(y_true, y_pred)
 
     print(f"\nBaseline evaluation ({label}):")
     print(f"  MAE  : {mae:.2f}")
@@ -178,6 +165,28 @@ def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) 
         print(f"  Cost-weighted MAE (|price|-weighted): {cost_weighted_mae:.2f}")
     if np.isfinite(smape):
         print(f"  sMAPE: {smape:.2f}% (caution near zero/negative prices)")
+
+
+def evaluate_direction_accuracy(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_current: np.ndarray,
+    label: str = "Model",
+    move_threshold: float = 1.0,
+) -> None:
+    """Wrapper that delegates to metrics_utils.evaluate_direction_accuracy.
+
+    Kept for backwards compatibility within this module, but the core
+    implementation now lives in metrics_utils.
+    """
+
+    metrics_utils.evaluate_direction_accuracy(
+        y_true,
+        y_pred,
+        y_current,
+        label=label,
+        move_threshold=move_threshold,
+    )
 
 
 def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
@@ -224,6 +233,12 @@ def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     # Baseline 1: persistence y_hat_{t+h} = RRP_t
     persistence_pred = current_rrp.copy()
     evaluate_point_forecast(y_true, persistence_pred, label="Persistence")
+    evaluate_direction_accuracy(
+        y_true,
+        persistence_pred,
+        current_rrp,
+        label="Persistence",
+    )
 
     # Baseline 2: seasonal naive y_hat_{t+h} = RRP_{t+h-steps_per_day}
     rrp_target_seasonal = rrp_target.shift(steps_per_day)
@@ -231,9 +246,16 @@ def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     if seasonal_mask.any():
         y_true_seasonal = rrp_target[seasonal_mask].values
         y_pred_seasonal = rrp_target_seasonal[seasonal_mask].values
+        current_rrp_seasonal = current_rrp[seasonal_mask]
         evaluate_point_forecast(
             y_true_seasonal,
             y_pred_seasonal,
+            label="Seasonal naive (1-day)",
+        )
+        evaluate_direction_accuracy(
+            y_true_seasonal,
+            y_pred_seasonal,
+            current_rrp_seasonal,
             label="Seasonal naive (1-day)",
         )
 
