@@ -3,10 +3,13 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from statsmodels.tsa.stattools import adfuller
 import time
 import warnings
+import time_utils
 
-def fit_arima(series: pd.Series, order: tuple, max_iterations = 50):
+
+def fit_arima(series: pd.Series, order: tuple, max_iterations: int = 50):
     """fits ARIMA models with convergence handling."""
 
     # ConvergenceWarning: Maximum Likelihood optimization failed to converge. Check mle_retvals
@@ -48,39 +51,70 @@ def grid_search_arima(series, p_values, q_values) -> tuple[tuple, ARIMA]:
                 best_order = (p, 0, q)
                 best_model = model_fit
 
-
-
     return best_order, best_model
 
 
-def baseline_TSA(df, p_value = None, q_value = None):
+def _transform_rrp_to_log_and_diff(rrp: pd.Series) -> tuple[pd.Series, dict]:
+    """Log-transform RRP with a positive shift and difference once.
+    Returns the differenced log series plus transform_info needed to
+    invert forecasts back to the original price scale.
+    """
+
+    shift = 1 - min(0.0, rrp.min())
+    rrp_log = np.log(rrp + shift)
+    rrp_log_diff = rrp_log.diff().dropna()
+    transform_info = {"shift": shift, "last_log_level": rrp_log.iloc[-1]}
+    return rrp_log_diff, transform_info
+
+
+def _invert_diff_log_forecast(diff_forecast: pd.Series, transform_info: dict) -> pd.Series:
+    """Invert a forecast made on the differenced log scale."""
+
+    last_log_level = transform_info["last_log_level"]
+    shift = transform_info["shift"]
+    log_level_forecast = last_log_level + diff_forecast.cumsum()
+    return np.exp(log_level_forecast) - shift
+
+
+def baseline_TSA(df, p_value: int | None = None, q_value: int | None = None):
     """Performs Time Series Analysis using ARIMA model to act as a baseline,
     ignores most features besides RRP series."""
 
     if not isinstance(df.index, pd.DatetimeIndex):
-        raise TypeError("DataFrame index must be a DatetimeIndex"
-"                        clean data first.")
+        raise TypeError("DataFrame index must be a DatetimeIndex; clean data first.")
 
     rrp = df["RRP"].resample("30min").mean().ffill().dropna()
 
-    # Log-transform RRP with a positive shift to handle
-    # negative prices without dropping data.
-    shift = 1 - min(0.0, rrp.min())
-    rrp_log = np.log(rrp + shift)
+    # Log-transform with a positive shift to handle negative prices,
+    # then difference once to safely fix d=0 in ARIMA.
+    # Check stationarity below to make this explicit rather than
+    # guessing.
+    rrp_log_diff, transform_info = _transform_rrp_to_log_and_diff(rrp)
 
-    # Manually difference the log series and fix d=0 in ARIMA,
-    # so basically fitting an ARMA(p,q) model to the stationary series.
-    rrp_log_diff = rrp_log.diff().dropna()
+    # Check stationarity with ADF test
+    try:
+        p_log = adfuller(np.log(rrp + transform_info["shift"]).dropna(), autolag="AIC")[1]
+    except Exception:
+        p_log = np.nan
+    try:
+        p_diff = adfuller(rrp_log_diff.dropna(), autolag="AIC")[1]
+    except Exception:
+        p_diff = np.nan
+    print(f"ADF p-values: log RRP={p_log:.4f}, diff(log RRP)={p_diff:.4f}")
+
+    best_model = None
+    best_order = None
 
     if p_value is not None and q_value is not None:
         print(f"Fitting ARIMA({p_value},0,{q_value}) model...")
         start_time = time.time()
         model = fit_arima(rrp_log_diff, order=(p_value, 0, q_value))
         if model is None:
-            raise RuntimeError (f"ARIMA({p_value},0,{q_value}) model fitting failed.")
-            
-        elapsed_time = time.time() - start_time
+            raise RuntimeError(f"ARIMA({p_value},0,{q_value}) model fitting failed.")
 
+        best_model = model
+        best_order = (p_value, 0, q_value)
+        elapsed_time = time.time() - start_time
         print(f"Model fitted in {elapsed_time:.2f} seconds\n")
 
     else:
@@ -94,22 +128,114 @@ def baseline_TSA(df, p_value = None, q_value = None):
             q_values=range(0, 3),
         )
         elapsed_time = time.time() - start_time
+        if best_order is None or best_model is None:
+            raise RuntimeError("Grid search did not produce a valid ARIMA model.")
         print(f"Fitting ARIMA({best_order[0]},0,{best_order[2]}) model...")
         print(f"Model fitted in {elapsed_time:.2f} seconds\n")
+
     print(best_model.summary())
 
     print("\nGenerating forecast...")
 
-    # Forecast on the differenced log scale, then invert the differencing
-    # and log-transform back to the original price scale.
-    diff_forecast = best_model.forecast(steps=48) 
-    last_log_level = rrp_log.iloc[-1]
-    log_level_forecast = last_log_level + diff_forecast.cumsum()
-    price_forecast = np.exp(log_level_forecast) - shift
+    # Forecast on the differenced log scale, then invert the
+    # transformation back to the original price scale.
+    diff_forecast = best_model.forecast(steps=48)
+    price_forecast = _invert_diff_log_forecast(diff_forecast, transform_info)
 
     print("Forecasted RRP for next 24 hours (48 half-hour intervals):")
     print(price_forecast)
 
+def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> None:
+    """Print simple MAE/RMSE/sMAPE metrics for a forecast."""
+
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+    # Cost-weighted MAE: weight errors by the absolute true price so that
+    # mistakes made at very high prices count more than mistakes at low prices.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weights = np.abs(y_true)
+        errors = np.abs(y_true - y_pred)
+        mask_weights = np.isfinite(weights) & np.isfinite(errors) & (weights > 0)
+        if mask_weights.any():
+            cost_weighted_mae = float(
+                np.sum(errors[mask_weights] * weights[mask_weights])
+                / np.sum(weights[mask_weights])
+            )
+        else:
+            cost_weighted_mae = np.nan
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denom = np.abs(y_true) + np.abs(y_pred)
+        smape = 2.0 * np.abs(y_true - y_pred) / denom
+        smape = smape[np.isfinite(smape)]
+        smape = float(np.mean(smape)) * 100 if smape.size > 0 else np.nan
+
+    print(f"\nBaseline evaluation ({label}):")
+    print(f"  MAE  : {mae:.2f}")
+    print(f"  RMSE : {rmse:.2f}")
+    if np.isfinite(cost_weighted_mae):
+        print(f"  Cost-weighted MAE (|price|-weighted): {cost_weighted_mae:.2f}")
+    if np.isfinite(smape):
+        print(f"  sMAPE: {smape:.2f}% (caution near zero/negative prices)")
+
+
+def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
+    """Compute simple persistence and seasonal-naive baselines for RRP.
+    forecast RRP at t + h using only information available
+    at time t, then compare against realised RRP_{t+h} across the
+    historical sample.
+    """
+
+    if "SETTLEMENTDATE" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        df = df.set_index("SETTLEMENTDATE")
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("DataFrame index must be a DatetimeIndex; clean data first.")
+
+    rrp = df["RRP"].sort_index()
+
+    # Work on a regular 30-minute series to keep things comparable
+    rrp = rrp.resample("30min").mean().ffill().dropna()
+
+    # Infer time step and derive horizon and daily period in steps
+    step_minutes = time_utils.infer_step_minutes(rrp.index, fallback_minutes=30.0)
+    ratio = horizon_minutes / step_minutes
+    horizon_steps = max(1, int(round(ratio)))
+    if abs(ratio - horizon_steps) > 1e-3:
+        raise ValueError(
+            f"Requested horizon {horizon_minutes} minutes is not an integer "
+            f"multiple of inferred step {step_minutes:.3f} minutes."
+        )
+    steps_per_day = int(round(1440.0 / step_minutes))
+
+    # Build the h-step-ahead target: RRP_{t+h}
+    rrp_target = rrp.shift(-horizon_steps)
+    mask = rrp_target.notna()
+    y_true = rrp_target[mask].values
+    current_rrp = rrp[mask].values
+
+    print(
+        f"Baseline design: horizon={horizon_minutes} minutes, "
+        f"step={step_minutes:.2f} minutes, horizon_steps={horizon_steps}, "
+        f"steps_per_day={steps_per_day}"
+    )
+
+    # Baseline 1: persistence y_hat_{t+h} = RRP_t
+    persistence_pred = current_rrp.copy()
+    evaluate_point_forecast(y_true, persistence_pred, label="Persistence")
+
+    # Baseline 2: seasonal naive y_hat_{t+h} = RRP_{t+h-steps_per_day}
+    rrp_target_seasonal = rrp_target.shift(steps_per_day)
+    seasonal_mask = mask & rrp_target_seasonal.notna()
+    if seasonal_mask.any():
+        y_true_seasonal = rrp_target[seasonal_mask].values
+        y_pred_seasonal = rrp_target_seasonal[seasonal_mask].values
+        evaluate_point_forecast(
+            y_true_seasonal,
+            y_pred_seasonal,
+            label="Seasonal naive (1-day)",
+        )
 
 def main():
     file_path = "CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv"
@@ -122,6 +248,12 @@ def main():
     print("Running ARIMA analysis for baseline comparison")
     print("=" * 70)
     baseline_TSA(df)
+    print("=" * 70 + "\n")
+
+    print("\n" + "=" * 70)
+    print("Running naive baseline models (persistence, seasonal)")
+    print("=" * 70)
+    run_baseline_models(df, horizon_minutes=30)
     print("=" * 70 + "\n")
 
 if __name__ == "__main__":
