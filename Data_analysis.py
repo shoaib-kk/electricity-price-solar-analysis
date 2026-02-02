@@ -7,7 +7,7 @@ from statsmodels.tsa.stattools import adfuller
 import time
 import warnings
 import time_utils
-import metrics_utils
+import Metrics_utils
 
 
 def fit_arima(series: pd.Series, order: tuple, max_iterations: int = 50):
@@ -149,14 +149,14 @@ def baseline_TSA(df, p_value: int | None = None, q_value: int | None = None):
 def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> None:
     """Print simple MAE/RMSE/sMAPE metrics for a forecast."""
 
-    metrics = metrics_utils.compute_mae_rmse_smape(y_true, y_pred)
+    metrics = Metrics_utils.compute_mae_rmse_smape(y_true, y_pred)
     mae = metrics["mae"]
     rmse = metrics["rmse"]
     smape = metrics["smape"]
 
     # Cost-weighted MAE: weight errors by the absolute true price so that
     # mistakes made at very high prices count more than mistakes at low prices.
-    cost_weighted_mae = metrics_utils.compute_cost_weighted_mae(y_true, y_pred)
+    cost_weighted_mae = Metrics_utils.compute_cost_weighted_mae(y_true, y_pred)
 
     print(f"\nBaseline evaluation ({label}):")
     print(f"  MAE  : {mae:.2f}")
@@ -180,7 +180,7 @@ def evaluate_direction_accuracy(
     implementation now lives in metrics_utils.
     """
 
-    metrics_utils.evaluate_direction_accuracy(
+    Metrics_utils.evaluate_direction_accuracy(
         y_true,
         y_pred,
         y_current,
