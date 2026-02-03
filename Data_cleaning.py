@@ -30,7 +30,14 @@ def missing_data_percentage(df, column_name: str):
 
 
 def check_time_index(df, expected_freq_minutes=5):
-    # check for gaps and duplicates in time index
+    """Check for gaps/duplicates and reindex to a complete grid.
+
+    - Sorts index and removes duplicate timestamps.
+    - Reports the most common gap.
+    - Reindexes onto a complete DateTimeIndex with the expected
+      frequency so that downstream gap-filling operates on true
+      missing timestamps, not just existing NaNs.
+    """
 
     df = df.sort_index()
     initial_rows = len(df)
@@ -42,12 +49,10 @@ def check_time_index(df, expected_freq_minutes=5):
             f"Removed {duplicates_removed} duplicate timestamps ({duplicates_removed/initial_rows*100:.2f}%)."
         )
 
-    # list of time gaps between rows 
+    # list of time gaps between rows
     time_gaps = df.index.to_series().diff()
-
     mode_gap = time_gaps.mode()[0] if len(time_gaps) > 0 else None
 
-    # need to convert to Timedelta for comparison
     expected_gap = pd.Timedelta(minutes=expected_freq_minutes)
 
     if mode_gap and mode_gap != expected_gap:
@@ -56,6 +61,18 @@ def check_time_index(df, expected_freq_minutes=5):
         )
     else:
         print(f"Frequency validated: {expected_freq_minutes}min intervals")
+
+    # Reindex onto a complete 5-minute grid between first and last timestamp
+    if len(df.index) > 0:
+        full_index = pd.date_range(
+            start=df.index.min(),
+            end=df.index.max(),
+            freq=f"{expected_freq_minutes}T",
+        )
+        missing_timestamps = len(full_index) - len(df.index)
+        if missing_timestamps > 0:
+            print(f"Inserted {missing_timestamps} missing timestamps via reindex.")
+        df = df.reindex(full_index)
 
     return df
 
@@ -168,6 +185,10 @@ def feature_engineering(df, long_term_sin_cos_encoding: bool = True, rolling_sta
     # could cause overfitting so make optional 
     if rolling_stats:
         window = 12
+
+        # check this kinda just did it 
+        window = window/int(step_minutes/5)  # adjust window size based on step size
+        window = max(1, int(round(window)))
         df["RRP_roll_mean_12"] = df["RRP"].rolling(window=window, min_periods=window).mean()
         df["RRP_roll_std_12"] = df["RRP"].rolling(window=window, min_periods=window).std()
         df["RRP_roll_min_12"] = df["RRP"].rolling(window=window, min_periods=window).min()
@@ -204,42 +225,15 @@ def clean_data(df, apply_feature_engineering=True, long_term_encoding=True, roll
         df, rrp_bounds=(-1000, 15500), demand_bounds=(0, 20000)
     )
 
-    if apply_feature_engineering:
-        df = feature_engineering(df, long_term_sin_cos_encoding=long_term_encoding, 
-                                 rolling_stats=rolling_stats)
-        
-        rows_before = len(df)
-        lag_cols = [
-            "RRP_lag_1step",
-            "RRP_lag_1hour",
-            "RRP_lag_1day",
-            "TOTALDEMAND_lag_1step",
-            "TOTALDEMAND_lag_1hour",
-            "TOTALDEMAND_lag_1day",
-        ]
-        if rolling_stats:
-            lag_cols.extend(
-                [
-                    "RRP_roll_mean_12",
-                    "RRP_roll_std_12",
-                    "RRP_roll_min_12",
-                    "RRP_roll_max_12",
-                    "TOTALDEMAND_roll_mean_12",
-                    "TOTALDEMAND_roll_std_12",
-                ]
-            )
-        
-        df = df.dropna(subset=lag_cols)
-        rows_dropped = rows_before - len(df)
-        if rows_dropped > 0:
-            print(f"  Dropped {rows_dropped} rows with NaN values from feature engineering")
+    # Feature engineering is now handled exclusively in prepare_train_test_features
+    # to avoid duplicate pathways and inconsistent NaN dropping.
 
     print(f"\nCleaning complete. Final shape: {df.shape}")
     return df
 
 
 def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding = True,
-                                 rolling_stats = True, lag: int = 288):
+                                 rolling_stats = True):
     lag_cols = [
         "RRP_lag_1step",
         "RRP_lag_1hour",
@@ -264,12 +258,22 @@ def prepare_train_test_features(train_cleaned, test_cleaned, long_term_encoding 
     print("\n" + "=" * 70)
     print("Engineering features for TEST (using train history)...")
     print("=" * 70)
-    # Take last 288 rows of cleaned train as history for test lags
-    train_history = train_cleaned.tail(lag)
-    
+
+    # Derive required history length from time step and maximum lookback
+    step_minutes = time_utils.infer_step_minutes(train_cleaned.index, fallback_minutes=5.0)
+    steps_per_day = max(1, int(round(1440.0 / step_minutes)))
+
+    # Match rolling window logic in feature_engineering: base 12 (5-min) window
+    base_window = 12
+    window_steps = base_window / (step_minutes / 5.0)
+    window_steps = max(1, int(round(window_steps)))
+
+    history_steps = steps_per_day + window_steps
+    train_history = train_cleaned.tail(history_steps)
+
     # Concatenate history + test
     combined = pd.concat([train_history, test_cleaned])
-    
+
     # Compute features on combined data, this way test lags all have values
     combined_with_features = feature_engineering(combined, long_term_sin_cos_encoding=long_term_encoding,
                                                   rolling_stats=rolling_stats)
@@ -348,4 +352,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# main is getting a bit too long 
