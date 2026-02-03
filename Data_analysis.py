@@ -81,6 +81,11 @@ def baseline_TSA(df, p_value: int | None = None, q_value: int | None = None):
     """Performs Time Series Analysis using ARIMA model to act as a baseline,
     ignores most features besides RRP series."""
 
+    # Ensure we have a DatetimeIndex; if SETTLEMENTDATE is present
+    # as a column, use it as the index (mirrors run_baseline_models).
+    if "SETTLEMENTDATE" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+        df = df.set_index("SETTLEMENTDATE")
+
     if not isinstance(df.index, pd.DatetimeIndex):
         raise TypeError("DataFrame index must be a DatetimeIndex; clean data first.")
 
@@ -147,12 +152,15 @@ def baseline_TSA(df, p_value: int | None = None, q_value: int | None = None):
     print(price_forecast)
 
 def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) -> None:
-    """Print simple MAE/RMSE/sMAPE metrics for a forecast."""
+    """Print simple MAE/RMSE metrics for a forecast.
+
+    sjuo sMAPE because percentage errors become unstable and misleading when prices approach zero or
+    go negative which happens in this market .
+    """
 
     metrics = Metrics_utils.compute_mae_rmse_smape(y_true, y_pred)
     mae = metrics["mae"]
     rmse = metrics["rmse"]
-    smape = metrics["smape"]
 
     # Cost-weighted MAE: weight errors by the absolute true price so that
     # mistakes made at very high prices count more than mistakes at low prices.
@@ -163,31 +171,10 @@ def evaluate_point_forecast(y_true: np.ndarray, y_pred: np.ndarray, label: str) 
     print(f"  RMSE : {rmse:.2f}")
     if np.isfinite(cost_weighted_mae):
         print(f"  Cost-weighted MAE (|price|-weighted): {cost_weighted_mae:.2f}")
-    if np.isfinite(smape):
-        print(f"  sMAPE: {smape:.2f}% (caution near zero/negative prices)")
-
-
-def evaluate_direction_accuracy(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    y_current: np.ndarray,
-    label: str = "Model",
-    move_threshold: float = 1.0,
-) -> None:
-    """Wrapper that delegates to metrics_utils.evaluate_direction_accuracy.
-
-    Kept for backwards compatibility within this module, but the core
-    implementation now lives in metrics_utils.
-    """
-
-    Metrics_utils.evaluate_direction_accuracy(
-        y_true,
-        y_pred,
-        y_current,
-        label=label,
-        move_threshold=move_threshold,
+    print(
+        "  Note: sMAPE is not reported because it becomes unstable "
+        "and misleading when prices are near zero or negative."
     )
-
 
 def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     """Compute simple persistence and seasonal-naive baselines for RRP.
@@ -221,8 +208,11 @@ def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     # Build the h-step-ahead target: RRP_{t+h}
     rrp_target = rrp.shift(-horizon_steps)
     mask = rrp_target.notna()
-    y_true = rrp_target[mask].values
-    current_rrp = rrp[mask].values
+
+    # Keep these as aligned Series; convert to numpy only when
+    # passing into metric functions 
+    y_true_series = rrp_target[mask]
+    current_rrp_series = rrp[mask]
 
     print(
         f"Baseline design: horizon={horizon_minutes} minutes, "
@@ -231,12 +221,16 @@ def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     )
 
     # Baseline 1: persistence y_hat_{t+h} = RRP_t
-    persistence_pred = current_rrp.copy()
-    evaluate_point_forecast(y_true, persistence_pred, label="Persistence")
-    evaluate_direction_accuracy(
-        y_true,
-        persistence_pred,
-        current_rrp,
+    persistence_pred = current_rrp_series.copy()
+    evaluate_point_forecast(
+        y_true_series.values,
+        persistence_pred.values,
+        label="Persistence",
+    )
+    Metrics_utils.evaluate_direction_accuracy(
+        y_true_series.values,
+        persistence_pred.values,
+        current_rrp_series.values,
         label="Persistence",
     )
 
@@ -244,18 +238,20 @@ def run_baseline_models(df: pd.DataFrame, horizon_minutes: int = 30) -> None:
     rrp_target_seasonal = rrp_target.shift(steps_per_day)
     seasonal_mask = mask & rrp_target_seasonal.notna()
     if seasonal_mask.any():
-        y_true_seasonal = rrp_target[seasonal_mask].values
-        y_pred_seasonal = rrp_target_seasonal[seasonal_mask].values
-        current_rrp_seasonal = current_rrp[seasonal_mask]
+        # Use the original resampled series for alignment rather than
+        # indexing into a masked numpy array.
+        y_true_seasonal = rrp_target[seasonal_mask]
+        y_pred_seasonal = rrp_target_seasonal[seasonal_mask]
+        current_rrp_seasonal = rrp[seasonal_mask]
         evaluate_point_forecast(
-            y_true_seasonal,
-            y_pred_seasonal,
+            y_true_seasonal.values,
+            y_pred_seasonal.values,
             label="Seasonal naive (1-day)",
         )
-        evaluate_direction_accuracy(
-            y_true_seasonal,
-            y_pred_seasonal,
-            current_rrp_seasonal,
+        Metrics_utils.evaluate_direction_accuracy(
+            y_true_seasonal.values,
+            y_pred_seasonal.values,
+            current_rrp_seasonal.values,
             label="Seasonal naive (1-day)",
         )
 
@@ -269,7 +265,7 @@ def main():
     print("\n" + "=" * 70)
     print("Running ARIMA analysis for baseline comparison")
     print("=" * 70)
-    baseline_TSA(df)
+    baseline_TSA(df, p_value = 1, q_value = 2)
     print("=" * 70 + "\n")
 
     print("\n" + "=" * 70)
