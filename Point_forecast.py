@@ -5,7 +5,10 @@ import time
 import xgboost as xgb
 import time_utils
 import Metrics_utils
+from logging import setup_logging
+import logging 
 
+setup_logging()
 
 
 def load_cleaned_datasets():
@@ -75,6 +78,7 @@ def build_feature_matrices(
     drop_cols = {"SETTLEMENTDATE", "REGION", "PERIODTYPE", "RRP", "TOTALDEMAND", "RRP_target"}
 
     feature_cols = get_feature_columns(train_df, drop_cols)
+    
     # Ensure all chosen feature columns exist in test as well
     missing_in_test = [c for c in feature_cols if c not in test_df.columns]
     if missing_in_test:
@@ -91,7 +95,7 @@ def build_feature_matrices(
     pct_test = (n_test_nans / total_test * 100.0) if total_test else 0.0
 
     # just in case even tho should be zero 
-    print(
+    logging.info(
         f"NaNs in X_train: {n_train_nans} ({pct_train:.4f}% of entries), "
         f"NaNs in X_test: {n_test_nans} ({pct_test:.4f}% of entries)"
     )
@@ -100,10 +104,10 @@ def build_feature_matrices(
     if n_train_nans or n_test_nans:
         train_nan_per_feature = train_df[feature_cols].isna().sum()
         test_nan_per_feature = test_df[feature_cols].isna().sum()
-        print("NaNs per feature (train):")
-        print(train_nan_per_feature[train_nan_per_feature > 0].sort_values(ascending=False))
-        print("NaNs per feature (test):")
-        print(test_nan_per_feature[test_nan_per_feature > 0].sort_values(ascending=False))
+        logging.info("NaNs per feature (train):")
+        logging.info(train_nan_per_feature[train_nan_per_feature > 0].sort_values(ascending=False))
+        logging.info("NaNs per feature (test):")
+        logging.info(test_nan_per_feature[test_nan_per_feature > 0].sort_values(ascending=False))
 
     # For return/direction metrics also need the current price at time t
     current_rrp_test = test_df["RRP"].values
@@ -174,22 +178,19 @@ def fit_xgboost_regressor(X_train, y_train, X_val, y_val, feature_cols=None):
 
 
 def evaluate_point_forecast(y_true, y_pred, y_current=None, label="Model"):
-    """Print basic regression metrics for a forecast.
-
-    Use MAE/RMSE and sMAPE; avoid plain MAPE because
-    prices can be near zero or negative.
-    """
+    """Print basic regression metrics for a forecast."""
 
     metrics = Metrics_utils.compute_mae_rmse_smape(y_true, y_pred)
     mae = metrics["mae"]
     rmse = metrics["rmse"]
-    smape = metrics["smape"]
 
-    print(f"\nPoint forecast evaluation on TEST set ({label}):")
-    print(f"  MAE  : {mae:.2f}")
-    print(f"  RMSE : {rmse:.2f}")
-    if np.isfinite(smape):
-        print(f"  sMAPE: {smape:.2f}% (caution near zero/negative prices)")
+    logging.info(f"\nPoint forecast evaluation on TEST set ({label}):")
+    logging.info(f"  MAE  : {mae:.2f}")
+    logging.info(f"  RMSE : {rmse:.2f}")
+    logging.info(
+        "  Note: sMAPE is not reported because it becomes unstable "
+        "and misleading when prices are near zero or negative."
+    )
 
     # Optional: report behaviour on "returns" and direction, which is
     # more relevant for arbitrage decisions than raw price error.
