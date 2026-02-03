@@ -85,12 +85,40 @@ def evaluate_direction_accuracy(
 
     if n_eval <= 0 or not np.isfinite(direction_acc):
         print(
-            f"  Direction accuracy on returns (> {move_threshold:.1f}) [{label}]: "
+            f"Direction accuracy on returns (> {move_threshold:.1f}) [{label}]: "
             "no cases above threshold"
         )
         return
 
     print(
-        f"  Direction accuracy on returns (> {move_threshold:.1f}) [{label}]: "
+        f"Direction accuracy on returns (> {move_threshold:.1f}) [{label}]: "
         f"{direction_acc:.2f}% over {n_eval} cases"
     )
+
+
+def evaluate_mae_across_horizons(
+    horizons_minutes,
+    build_y_true_pred_fn,
+    label: str = "Model",
+):
+    """Compute and print MAE for multiple forecast horizons.
+    Returns
+    list of (horizon_minutes, mae)
+    """
+
+    results = []
+    for horizon in horizons_minutes:
+        y_true, y_pred = build_y_true_pred_fn(horizon)
+        metrics = compute_mae_rmse_smape(y_true, y_pred)
+        mae = metrics["mae"]
+        results.append((horizon, mae))
+        print(
+            f"TEST MAE at horizon {horizon} min [{label}]: "
+            f"{mae:.2f} AUD/MWh"
+        )
+
+    print("\nSummary of TEST MAE by horizon (minutes):")
+    for horizon, mae in results:
+        print(f"  {horizon:>5} min [{label}]: MAE = {mae:.2f} AUD/MWh")
+
+    return results
