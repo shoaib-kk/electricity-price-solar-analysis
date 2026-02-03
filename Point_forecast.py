@@ -5,7 +5,7 @@ import time
 import xgboost as xgb
 import time_utils
 import Metrics_utils
-from logging import setup_logging
+from logging_utils import setup_logging
 import logging 
 
 setup_logging()
