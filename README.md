@@ -68,14 +68,50 @@ These datasets are:
 - feature-complete,
 - and ready for modelling.
 
+### Modeling
+#### Baseline 
+- ARIMA is used as a baseline for this data to provide a method of comparison to other models that will be used later on. It  performs poorly on the high frequency price data and exhibits convergence issues due to strong intraday seasonality, price spikes, and the engineered features.
+
+These limitations are the source of motivation for the use of feature-based machine learning models in later stages of the project
+
+
+
+
+
+
+#### Quantile Forecast Calibration
+
+- Initial LightGBM quantile models produced reasonable forecasts but exhibited systematic miscalibration:
+
+	- 5% quantile covered only 2.9% of observations
+
+	- 90% prediction intervals covered 93.8% 
+
+- To address this, I implemented a validation-based quantile mapping calibration layer, which:
+
+	- learned empirical bias corrections from a held-out validation set
+
+	- adjusted the lower  and upper quantiles
+
+	- preserved proper out-of-sample evaluation
+
+	Results after calibration:
+
+	- 5% quantile coverage improved from 2.9% → 4.0%
+
+	- 90% interval coverage improved from 93.8% → 91.7%
+
+	mean interval width reduced from 100.8 → 93.1 AUD/MWh
+
+pinball loss remained stable
 ### Key highlights 
 
 - No leakage: time order is respected everywhere.
 - Explicit logging: gaps, drops, and assumptions are printed.
 - Modularity: collection, cleaning, and feature engineering are separable.
 
-The bulk of work has so far been dedicated to ensuring the integrity of the data so modeling will be reliable. It was also important to understand how electricity pricing works to ensure I didn't remove actually plausible values.
 
+I evaluated against proper baselines and discovered my ML point model does not beat persistence – which led me to focus on probabilistic forecasting instead.
 ### Scope & Limitations
 
 This repository does not yet include forecasting models.
