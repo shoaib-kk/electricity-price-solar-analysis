@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -9,6 +11,17 @@ from logging_utils import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ConformalQuantileBundle:
+    models: dict[float, lgb.LGBMRegressor]
+    feature_cols: list[str]
+    Q: float
+    quantiles: list[float]
+    alpha_low: float
+    alpha_high: float
+    target_coverage: float
 
 
 def load_cleaned_datasets():
@@ -154,6 +167,7 @@ def compute_split_conformal_interval(
     q_high_val = pd.Series(models[alpha_high].predict(X_val), index=y_val.index)
 
     nonconformity = np.maximum(q_low_val - y_val, y_val - q_high_val)
+    nonconformity = np.maximum(nonconformity, 0.0)
     nonconformity = nonconformity.to_numpy()
 
     n_cal = nonconformity.shape[0]
@@ -207,6 +221,7 @@ def manage_train_test_split(forecast_horizon_minutes: int = 30):
         y_test,
         feature_cols,
         current_rrp_test,
+        test_timestamps,
     ) = Point_forecast.build_feature_matrices(
         train_df,
         test_df,
@@ -215,9 +230,9 @@ def manage_train_test_split(forecast_horizon_minutes: int = 30):
 
     # Wrap arrays back into DataFrames/Series for LightGBM
     X_all_df = pd.DataFrame(X_all_train, columns=feature_cols)
-    X_test_df = pd.DataFrame(X_test, columns=feature_cols)
+    X_test_df = pd.DataFrame(X_test, columns=feature_cols, index=test_timestamps)
     y_all = pd.Series(y_all_train, name="RRP_target")
-    y_true_test = pd.Series(y_test, name="RRP_target")
+    y_true_test = pd.Series(y_test, name="RRP_target", index=test_timestamps)
 
     n_train_total = X_all_df.shape[0]
     val_start = int(n_train_total * 0.8)
@@ -297,6 +312,37 @@ def directional_performance(y_pred_quantiles_raw, current_rrp_test, y_true_test)
         )
 
 
+def predict_conformal(bundle: ConformalQuantileBundle, X: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X, columns=bundle.feature_cols)
+
+    X = validate_features(X)
+
+    missing = [col for col in bundle.feature_cols if col not in X.columns]
+    if missing:
+        raise KeyError(f"Missing required feature columns: {missing}")
+
+    X = X[bundle.feature_cols]
+
+    y_pred_dict = predict_quantiles(bundle.models, X)
+    y_pred_quantiles_raw = pd.DataFrame(y_pred_dict, index=X.index)
+
+    lower_conf = y_pred_quantiles_raw[bundle.alpha_low] - bundle.Q
+    upper_conf = y_pred_quantiles_raw[bundle.alpha_high] + bundle.Q
+    if 0.5 in y_pred_quantiles_raw.columns:
+        median = y_pred_quantiles_raw[0.5]
+    else:
+        median = y_pred_quantiles_raw[bundle.quantiles[1]]
+
+    return pd.DataFrame(
+        {
+            "lower_conformal": lower_conf,
+            "median": median,
+            "upper_conformal": upper_conf,
+        }
+    )
+
+
 def run_conformal_calibration(
     models: dict[float, lgb.LGBMRegressor],
     X_val_df: pd.DataFrame,
@@ -307,7 +353,7 @@ def run_conformal_calibration(
     alpha_high: float = 0.95,
     target_coverage: float = 0.90,
     quantiles: list[float] = [0.05, 0.5, 0.95],
-) -> None:
+) -> float:
     """Compute and report split-conformal intervals using a helper.
     """
 
@@ -340,6 +386,8 @@ def run_conformal_calibration(
     )
     print("\nFirst few split-conformal intervals (lower/median/upper):")
     print(conformal_summary.head())
+
+    return Q
 
 
 
