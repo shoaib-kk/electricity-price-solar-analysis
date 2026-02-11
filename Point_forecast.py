@@ -111,8 +111,17 @@ def build_feature_matrices(
 
     # For return/direction metrics also need the current price at time t
     current_rrp_test = test_df["RRP"].values
+    test_timestamps = pd.DatetimeIndex(test_df["SETTLEMENTDATE"])
 
-    return X_train, y_train, X_test, y_test, feature_cols, current_rrp_test #, steps_per_day
+    return (
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        feature_cols,
+        current_rrp_test,
+        test_timestamps,
+    )
 
 
 def fit_xgboost_regressor(X_train, y_train, X_val, y_val, feature_cols=None):
@@ -215,7 +224,14 @@ def _get_feature_names_for_matrix(X, feature_cols=None):
 def main():
     train_df, test_df = load_cleaned_datasets()
     forecast_horizon_minutes = 30
-    (X_all_train,y_all_train, X_test, y_test, feature_cols, current_rrp_test, #steps_per_day,
+    (
+        X_all_train,
+        y_all_train,
+        X_test,
+        y_test,
+        feature_cols,
+        current_rrp_test,
+        _test_timestamps,
     ) = build_feature_matrices(train_df, test_df, horizon_minutes=forecast_horizon_minutes)
 
     n_train = X_all_train.shape[0]
