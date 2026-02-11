@@ -15,7 +15,7 @@ def infer_step_minutes(index, fallback_minutes: float = 5.0) -> float:
         diffs = pd.Series(index).diff().dropna()
 
     if diffs.empty:
-        return float(fallback_minutes)
+        return fallback_minutes
 
     delta = diffs.mode()[0]
     if isinstance(delta, pd.Timedelta):
