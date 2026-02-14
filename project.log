@@ -1,0 +1,25 @@
+2026-02-03 20:54:59,299 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-03 20:55:25,179 - root - INFO - 
+Quantile crossing rate (raw, before repair): 0.05> 0.5 = 0.00%, 0.5> 0.95 = 0.00%
+2026-02-03 20:55:25,179 - root - INFO - 
+RAW quantile pinball losses and marginal coverage on TEST set (no repair):
+2026-02-03 20:55:25,290 - root - INFO - RAW mean interval width [0.05, 0.95]: 96.58 AUD/MWh
+2026-02-09 13:32:39,925 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:36:16,825 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:40:03,061 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:46:26,467 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:47:08,964 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:47:51,747 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 13:48:31,397 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:19:19,966 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:20:35,903 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:21:34,591 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:22:31,014 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:39:56,280 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:41:07,487 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:42:04,142 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:43:06,593 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:50:12,540 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:51:23,626 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:52:21,192 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
+2026-02-09 14:53:16,668 - root - INFO - NaNs in X_train: 0 (0.0000% of entries), NaNs in X_test: 0 (0.0000% of entries)
