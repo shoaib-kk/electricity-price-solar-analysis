@@ -83,6 +83,30 @@ def baseline_threshold_policy(training_prices_kwh: pd.Series, low_quantile=0.3, 
     return policy, params
 
 
+def wrap_spike_discharge_policy(
+    policy: Callable,
+    training_prices_kwh: pd.Series,
+    spike_price_quantile: float = 0.99,
+    spike_discharge_power: float | None = None,
+    soc_buffer: float = 0.01,
+) -> tuple[Callable, dict]:
+    spike_threshold_kwh = float(training_prices_kwh.quantile(spike_price_quantile))
+
+    def wrapped_policy(timestamp, price_kwh, battery) -> tuple[str, float]:
+        if price_kwh >= spike_threshold_kwh and battery.soc > soc_buffer:
+            power = battery.max_power_kw if spike_discharge_power is None else spike_discharge_power
+            return "discharge", power
+        return policy(timestamp, price_kwh, battery)
+
+    params = {
+        "spike_price_quantile": spike_price_quantile,
+        "spike_discharge_power": spike_discharge_power,
+        "soc_buffer": soc_buffer,
+        "spike_threshold_kwh": spike_threshold_kwh,
+    }
+    return wrapped_policy, params
+
+
 
 
 
@@ -116,19 +140,6 @@ def filter_prices_by_period(
     return filtered
 
 
-def compute_valid_horizons(step_minutes: float, candidate_horizons: list[int]) -> list[int]:
-    """Compute valid forecast horizons that are integer multiples of the simulation step size."""
-    valid_horizons = []
-    for horizon in candidate_horizons:
-        ratio = horizon / step_minutes 
-        if abs(ratio - round(ratio)) < 0.001:
-            valid_horizons.append(horizon)
-        else:
-            logger.warning(f"Candidate horizon {horizon} minutes is not an integer multiple of step {step_minutes:.3f} minutes.")
-    if not valid_horizons:
-        raise ValueError("No valid horizons found.")
-    return valid_horizons
-
 
 def train_quantile_models_for_horizon(
     horizon_minutes: int,
@@ -138,10 +149,14 @@ def train_quantile_models_for_horizon(
     X_train_df, y_train, X_val_df, y_val, X_test_df, y_true_test, current_rrp_test = manage_train_test_split(
         forecast_horizon_minutes=horizon_minutes
     )
-    models = {}
-    for q in quantiles:
-        model = train_quantile_model(X_train_df, y_train, X_val_df, y_val, quantile=q, early_stopping_rounds=early_stopping_rounds)
-        models[q] = model
+    models = train_quantile_model(
+        X_train_df,
+        y_train,
+        quantiles=quantiles,
+        X_val=X_val_df,
+        y_val=y_val,
+        early_stopping_rounds=early_stopping_rounds,
+    )
 
     return models, X_train_df, y_train, X_val_df, y_val, X_test_df, y_true_test, current_rrp_test
 
@@ -165,12 +180,14 @@ def build_conformal_df_for_horizon(
     q_low_val = pd.Series(models[quantile_low].predict(X_val_df), index=y_val.index)
     q_high_val = pd.Series(models[quantile_high].predict(X_val_df), index=y_val.index)
 
+    # conformity scores are how far the true value is outside our predicted interval for NEM prices
     nonconformity = np.maximum(q_low_val - y_val, y_val - q_high_val)
     nonconformity = np.maximum(nonconformity, 0.0).to_numpy()
     
     if nonconformity.size == 0:
-        raise ValueError("Validation set is empty; cannot compute conformal intervals.")
+        raise ValueError
 
+    # q stat is juts the quantile of the conformity scores needed to correct nonconformity 
     q_statistic_static = _conformal_q_from_scores(nonconformity, target_coverage)
 
     q_low_test = pd.Series(models[quantile_low].predict(X_test_df), index=y_true_test.index)
@@ -188,6 +205,7 @@ def build_conformal_df_for_horizon(
     q_median_test = q_median_test.loc[test_index]
 
     if rolling_window is None or rolling_window <= 0:
+        # if no rolling window is specified, just use the static q statistic for all test points to create conformal intervals
         conformal_lower = q_low_test - q_statistic_static
         conformal_upper = q_high_test + q_statistic_static
         q_stat_series = pd.Series(q_statistic_static, index=y_true_test.index)
@@ -264,91 +282,278 @@ def build_multi_horizon_conformal_forecasts(
     return conformal_dfs, q_by_horizon
 
 
-def make_precomputed_forecast_policy(
+def make_aggressive_precomputed_forecast_policy(
     conformal_df: pd.DataFrame,
     *,
     horizon_minutes: int,
     fee_rate: float = 0.01,
     cost_per_kwh: float = 0.0,
-    min_signal_charge_usd_per_kwh: float = 0.0,
-    min_signal_discharge_usd_per_kwh: float = 0.0,
-    ev_scale: float = 0.02,
+    min_signal_charge_aud_per_kwh: float = 0.0,
+    min_signal_discharge_aud_per_kwh: float = 0.0,
     power_kw: float | None = None,
     soc_buffer: float = 0.01,
-    confidence_threshold: float = 0.1,
-    price_epsilon: float = 1.0,
 ):
-    """Policy function that uses precomputed conformal forecast intervals to make charging/discharging decisions 
-    based on the current price and battery state of charge (SoC)"""
-    def policy(timestamp: pd.Timestamp, price_kwh: float, battery: Battery) -> tuple[str, float]:
+    """
+    Aggressive forecast-based policy:
+    - No interval-width filtering
+    - No confidence scaling
+    - Full power when signal exceeds threshold
+    """
+
+    def policy(timestamp: pd.Timestamp, price_kwh: float, battery) -> tuple[str, float]:
         soc = battery.soc
         forecast_time = timestamp + pd.Timedelta(minutes=horizon_minutes)
-        
+
         if forecast_time not in conformal_df.index:
             return "hold", 0.0
-        
+
         row = conformal_df.loc[forecast_time]
-        lower = row["lower_conformal"]
-        upper = row["upper_conformal"]
-        median = row["median"] if "median" in row else (lower + upper) / 2
-        
-        interval_width = upper - lower
-        scale = max(abs(median), abs(price_kwh), price_epsilon)
-        relative_width = interval_width / scale
-        
-        if relative_width > confidence_threshold:
-            logger.debug(f"Timestamp {timestamp}: Interval too wide ({relative_width:.3f}). Holding.")
-            return "hold", 0.0
-        
-        # prices can be negative so take the absolute value for fee calculation 
+        median = row["median"]
+
+        # round-trip fee cost
         round_trip_fee_cost = 2 * fee_rate * abs(price_kwh)
         total_cost = cost_per_kwh + round_trip_fee_cost
-        
-        signal_charge = max(0.0, median - price_kwh - total_cost)
-        signal_discharge = max(0.0, price_kwh - median - total_cost)
-        
-        confidence_factor = 1.0 / (1.0 + relative_width)
-        
+
+        signal_charge = median - price_kwh - total_cost
+        signal_discharge = price_kwh - median - total_cost
+
         action = "hold"
         power = 0.0
-        
-        if signal_charge >= min_signal_charge_usd_per_kwh and soc < 1.0 - soc_buffer:
+
+        # Use full power if threshold exceeded
+        full_power = battery.max_power_kw if power_kw is None else power_kw
+
+        if signal_charge >= min_signal_charge_aud_per_kwh and soc < 1.0 - soc_buffer:
             action = "charge"
-            if power_kw is None:
-                base_power = signal_charge * ev_scale
-                power = base_power * confidence_factor
-            else:
-                power = power_kw * confidence_factor
-                
-        elif signal_discharge >= min_signal_discharge_usd_per_kwh and soc > soc_buffer:
+            power = full_power
+
+        elif signal_discharge >= min_signal_discharge_aud_per_kwh and soc > soc_buffer:
             action = "discharge"
-            if power_kw is None:
-                base_power = signal_discharge * ev_scale
-                power = base_power * confidence_factor
-            else:
-                power = power_kw * confidence_factor
-        
-        logger.debug(f"Timestamp {timestamp}: Forecast [{lower:.2f}, {median:.2f}, {upper:.2f}], "
-                    f"confidence={confidence_factor:.3f}. Action: {action} @ {power:.2f}kW")
-        
+            power = full_power
+
         return action, power
-    
+
     params = {
         "horizon_minutes": horizon_minutes,
         "fee_rate": fee_rate,
         "cost_per_kwh": cost_per_kwh,
-        "min_signal_charge_usd_per_kwh": min_signal_charge_usd_per_kwh,
-        "min_signal_discharge_usd_per_kwh": min_signal_discharge_usd_per_kwh,
-        "ev_scale": ev_scale,
+        "min_signal_charge_aud_per_kwh": min_signal_charge_aud_per_kwh,
+        "min_signal_discharge_aud_per_kwh": min_signal_discharge_aud_per_kwh,
         "power_kw": power_kw,
         "soc_buffer": soc_buffer,
-        "confidence_threshold": confidence_threshold,
-        "price_epsilon": price_epsilon,
     }
-    
 
     return policy, params
 
+
+def make_multi_horizon_aggressive_policy(
+    conformal_dfs: dict[int, pd.DataFrame],
+    *,
+    horizons_minutes: list[int],
+    fee_rate: float = 0.01,
+    cost_per_kwh: float = 0.0,
+    min_signal_charge_aud_per_kwh: float = 0.0,
+    min_signal_discharge_aud_per_kwh: float = 0.0,
+    power_kw: float | None = None,
+    soc_buffer: float = 0.01,
+    horizon_discount_minutes: float | None = None,
+    edge_k: float = 0.1,
+    edge_buffer_aud_per_kwh: float = 0.0,
+    min_margin_aud_per_kwh: float = 0.0,
+    min_hold_steps: int = 0,
+    min_switch_delta_aud_per_kwh: float = 0.0,
+    min_power_frac: float = 0.05,
+    fallback_target_soc: float = 0.5,
+    fallback_band: float = 0.05,
+    fallback_power_frac: float = 0.1,
+    fallback_price_bias: float = 0.0,
+    collect_diagnostics: bool = False,
+):
+    """
+    Best-opportunity policy:
+    - For each horizon: risk-adjusted edge vs width and costs
+    - Pick the single horizon with max |edge/(width+eps)|
+    - Require |edge| > k*width + fees + buffer + min_margin
+    - Power scales with margin above the gate; drops micro-trades
+    - Optional cooldown and hysteresis to reduce churn
+    - Optional diagnostics capture per step (action gating, margins, horizons)
+    """
+    last_trade_action = "hold"
+    last_trade_edge = 0.0
+    steps_since_trade_change = max(min_hold_steps, 0)
+
+    debug_records = [] if collect_diagnostics else None
+
+    def policy(timestamp: pd.Timestamp, price_kwh: float, battery: Battery) -> tuple[str, float]:
+        nonlocal last_trade_action, last_trade_edge, steps_since_trade_change
+        soc = battery.soc
+
+        best_score = float("-inf")
+        best_signed_edge = None
+        best_required_edge = None
+        best_width = None
+        best_action = "hold"
+        best_horizon = None
+        best_discount = None
+        best_total_cost = None
+
+        for horizon in horizons_minutes:
+            forecast_time = timestamp + pd.Timedelta(minutes=horizon)
+            if forecast_time not in conformal_dfs[horizon].index:
+                continue
+
+            row = conformal_dfs[horizon].loc[forecast_time]
+            lower_h = row["lower_conformal"]
+            upper_h = row["upper_conformal"]
+            median_h = row["median"] if "median" in row else (lower_h + upper_h) / 2
+
+            round_trip_fee_cost = 2 * fee_rate * abs(price_kwh)
+            total_cost = cost_per_kwh + round_trip_fee_cost
+
+            signed_edge = median_h - price_kwh  # positive favors charge, negative favors discharge
+            width = float(upper_h - lower_h)
+            gate = edge_k * width + edge_buffer_aud_per_kwh + total_cost + min_margin_aud_per_kwh
+
+            if signed_edge > 0:
+                action_dir = "charge"
+                edge_excess = signed_edge - gate
+            else:
+                action_dir = "discharge"
+                edge_excess = -signed_edge - gate
+
+            if edge_excess <= 0:
+                continue
+
+            if horizon_discount_minutes is None:
+                discount_h = 1.0
+            else:
+                discount_h = 1.0 / (1.0 + horizon / horizon_discount_minutes)
+
+            score = (abs(signed_edge) / (width + 1e-9)) * discount_h
+            if score > best_score:
+                best_score = score
+                best_signed_edge = signed_edge
+                best_required_edge = gate
+                best_width = width
+                best_action = action_dir
+                best_horizon = horizon
+                best_discount = discount_h
+                best_total_cost = total_cost
+
+        final_action = "hold"
+        final_power = 0.0
+        hold_reason = None
+
+        if best_action == "hold" or best_signed_edge is None or best_required_edge is None or best_width is None:
+            hold_reason = "no_horizon_passed_gate"
+            steps_since_trade_change += 1
+
+            full_power = battery.max_power_kw if power_kw is None else power_kw
+            fallback_power = full_power * fallback_power_frac
+
+            if soc > fallback_target_soc + fallback_band and soc > soc_buffer and price_kwh >= fallback_price_bias:
+                final_action = "discharge"
+                final_power = fallback_power
+                hold_reason = "fallback_discharge_to_target"
+                last_trade_action = "discharge"
+                last_trade_edge = 0.0
+            elif soc < fallback_target_soc - fallback_band and soc < 1.0 - soc_buffer:
+                final_action = "charge"
+                final_power = fallback_power
+                hold_reason = "fallback_charge_to_target"
+                last_trade_action = "charge"
+                last_trade_edge = 0.0
+        else:
+            full_power = battery.max_power_kw if power_kw is None else power_kw
+
+            action = best_action
+            if action == "charge" and (best_signed_edge < min_signal_charge_aud_per_kwh or soc >= 1.0 - soc_buffer):
+                hold_reason = "charge_blocked_signal_or_soc"
+                action = "hold"
+            if action == "discharge" and (-best_signed_edge < min_signal_discharge_aud_per_kwh or soc <= soc_buffer):
+                hold_reason = "discharge_blocked_signal_or_soc"
+                action = "hold"
+
+            steps_since_trade_change += 1
+            if action in {"charge", "discharge"}:
+                if last_trade_action in {"charge", "discharge"} and action != last_trade_action:
+                    if steps_since_trade_change <= min_hold_steps:
+                        hold_reason = "cooldown_hold"
+                        action = "hold"
+                    elif abs(best_signed_edge - last_trade_edge) < min_switch_delta_aud_per_kwh:
+                        hold_reason = "switch_delta_hold"
+                        action = "hold"
+
+                if action in {"charge", "discharge"}:
+                    if action != last_trade_action:
+                        steps_since_trade_change = 0
+                    last_trade_action = action
+                    last_trade_edge = best_signed_edge
+
+                    margin = abs(best_signed_edge) - best_required_edge
+                    strength = max(0.0, min(1.0, margin / (abs(best_signed_edge) + 1e-6)))
+                    power_raw = strength * full_power
+                    min_power = min_power_frac * full_power
+                    if power_raw < min_power:
+                        hold_reason = "below_min_power"
+                        action = "hold"
+                    else:
+                        final_action = action
+                        final_power = max(min_power, min(power_raw, full_power))
+
+        if collect_diagnostics:
+            debug_records.append(
+                {
+                    "timestamp": timestamp,
+                    "price_kwh": price_kwh,
+                    "soc": soc,
+                    "best_horizon": best_horizon,
+                    "best_width": best_width,
+                    "best_signed_edge": best_signed_edge,
+                    "required_edge": best_required_edge,
+                    "edge_margin": (abs(best_signed_edge) - best_required_edge) if (best_signed_edge is not None and best_required_edge is not None) else None,
+                    "score": None if best_score == float("-inf") else best_score,
+                    "discount": best_discount,
+                    "total_cost": best_total_cost,
+                    "action": final_action,
+                    "hold_reason": hold_reason,
+                    "power_kw": final_power,
+                    "steps_since_trade_change": steps_since_trade_change,
+                    "last_trade_action": last_trade_action,
+                }
+            )
+
+        return final_action, final_power
+
+    params = {
+        "conformal_dfs": conformal_dfs,
+        "horizons_minutes": horizons_minutes,
+        "fee_rate": fee_rate,
+        "cost_per_kwh": cost_per_kwh,
+        "min_signal_charge_aud_per_kwh": min_signal_charge_aud_per_kwh,
+        "min_signal_discharge_aud_per_kwh": min_signal_discharge_aud_per_kwh,
+        "power_kw": power_kw,
+        "soc_buffer": soc_buffer,
+        "horizon_discount_minutes": horizon_discount_minutes,
+        "edge_k": edge_k,
+        "edge_buffer_aud_per_kwh": edge_buffer_aud_per_kwh,
+        "min_margin_aud_per_kwh": min_margin_aud_per_kwh,
+        "min_hold_steps": min_hold_steps,
+        "min_switch_delta_aud_per_kwh": min_switch_delta_aud_per_kwh,
+                "min_power_frac": min_power_frac,
+                "fallback_target_soc": fallback_target_soc,
+                "fallback_band": fallback_band,
+                "fallback_power_frac": fallback_power_frac,
+                "fallback_price_bias": fallback_price_bias,
+        "collect_diagnostics": collect_diagnostics,
+    }
+
+    if collect_diagnostics:
+        policy.debug_records = debug_records
+    else:
+        policy.debug_records = None
+
+    return policy, params
 
 def make_multi_horizon_precomputed_policy(
     conformal_dfs: dict[int, pd.DataFrame],
@@ -356,8 +561,8 @@ def make_multi_horizon_precomputed_policy(
     horizons_minutes: list[int],
     fee_rate: float = 0.01,
     cost_per_kwh: float = 0.0,
-    min_signal_charge_usd_per_kwh: float = 0.0,
-    min_signal_discharge_usd_per_kwh: float = 0.0,
+    min_signal_charge_aud_per_kwh: float = 0.0,
+    min_signal_discharge_aud_per_kwh: float = 0.0,
     ev_scale: float = 0.02,
     power_kw: float | None = None,
     soc_buffer: float = 0.01,
@@ -389,7 +594,7 @@ def make_multi_horizon_precomputed_policy(
             upper_h = row["upper_conformal"]
             median_h = row["median"] if "median" in row else (lower_h + upper_h) / 2
             
-            round_trip_fee_cost = 2 * fee_rate * price_kwh
+            round_trip_fee_cost = 2 * fee_rate * abs(price_kwh)
             total_cost = cost_per_kwh + round_trip_fee_cost
             
             signal_charge = max(0.0, median_h - price_kwh - total_cost)
@@ -401,7 +606,8 @@ def make_multi_horizon_precomputed_policy(
                 interval_width = upper_h - lower_h
                 scale = max(abs(median_h), abs(price_kwh), price_epsilon)
                 relative_width_h = interval_width / scale
-                confidence_h = 1.0 / (relative_width_h + c)
+                # treat width as a penalty rather than a reward; cap near 1 for tight intervals
+                confidence_h = 1.0 / (1.0 + relative_width_h / max(c, 1e-9))
                 if confidence_cap is not None:
                     confidence_h = min(confidence_h, confidence_cap)
             else:
@@ -421,9 +627,9 @@ def make_multi_horizon_precomputed_policy(
         activity = aggregate_charge + aggregate_discharge
 
         if activity >= min_activity:
-            if net_norm >= min_signal_charge_usd_per_kwh and soc < 1.0 - soc_buffer:
+            if net_norm >= min_signal_charge_aud_per_kwh and soc < 1.0 - soc_buffer:
                 action = "charge"
-            elif net_norm <= -min_signal_discharge_usd_per_kwh and soc > soc_buffer:
+            elif net_norm <= -min_signal_discharge_aud_per_kwh and soc > soc_buffer:
                 action = "discharge"
 
             if action in {"charge", "discharge"}:
@@ -438,8 +644,8 @@ def make_multi_horizon_precomputed_policy(
         "horizons_minutes": horizons_minutes,
         "fee_rate": fee_rate,
         "cost_per_kwh": cost_per_kwh,
-        "min_signal_charge_usd_per_kwh": min_signal_charge_usd_per_kwh,
-        "min_signal_discharge_usd_per_kwh": min_signal_discharge_usd_per_kwh,
+        "min_signal_charge_aud_per_kwh": min_signal_charge_aud_per_kwh,
+        "min_signal_discharge_aud_per_kwh": min_signal_discharge_aud_per_kwh,
         "ev_scale": ev_scale,
         "power_kw": power_kw,
         "soc_buffer": soc_buffer,
@@ -494,8 +700,9 @@ def run_arbitrage_simulation(
         action, power_kw = policy(timestamp, price_kwh, battery)
         energy_bought, energy_sold, new_soc = battery.step(action, power_kw, dt_hours)
 
-        buy_fee = fee_rate * energy_bought * price_kwh
-        sell_fee = fee_rate * energy_sold * price_kwh
+        # NEM prices might be negative so have to avoid ending up with a negative buy fee or sell fee
+        buy_fee = fee_rate * energy_bought * abs(price_kwh)
+        sell_fee = fee_rate * energy_sold * abs(price_kwh)
         transaction_cost = buy_fee + sell_fee
         degradation_cost = degradation_cost_per_kwh * (energy_bought + energy_sold)
         

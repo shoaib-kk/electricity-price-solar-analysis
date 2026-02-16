@@ -1,120 +1,70 @@
-## Time Series Data Pipeline: Electricity Price & Demand (NEM – Victoria)
+# Battery Arbitrage using Conformal Prediction and Multi-Horizon Forecasting
 
-### Project Overview
+This project implements an end to end battery arbitrage trading strategy, starting from collection data from the Australian National Electricity Market (NEM), cleaning, feature engineering, and ultimately using quantile regression and conformal prediction to forecast electricity prices and make uncertainty-aware charging and discharging decisions to yield a profit.
 
-This repository implements a full data pipeline for time-series modelling using Australian National Electricity Market (NEM) data. Modules were based on Victorian data so may require changes for other states.
+The system is evaluated against a strong baseline threshold policy using real electricity price data from the NEM.
 
-The focus of this project is data engineering and modelling (soon to come). Data integrity and leakage preventage was a large portion of this project to make the data usable for forecasting later on 
+---
 
-### Data Source
+## Overview
 
-Files are downloaded directly from AEMO, merged, de-duplicated, sorted, and exported into a single consolidated CSV before cleaning.
+Electricity prices in the NEM are extremely volatile and often exhibit extreme spikes. Battery arbitrage involves charging when prices are low and discharging when prices are high to capture profit.
 
-### Pipeline Structure
+This project explores whether forecast-based strategies using uncertainty-aware conformal prediction can outperform simple heuristic threshold policies.
 
-#### 1. Data Collection & Merging
- Downloads monthly AEMO CSV files with retry logic and outputs a single sorted CSV:
-	- PRICE_AND_DEMAND_FULL_VIC1.csv
+The pipeline includes:
 
-#### 2. Time Index Validation
-e
-Removes duplicate timestamps and reports unexpected gaps 
+- Data collection and cleaning of NEM price data
+- Multi-horizon quantile regression forecasting
+- Conformal prediction interval calibration
+- Battery simulation with realistic constraints and transaction costs
+- Strategy backtesting and performance evaluation
 
-#### 3. Missing Data Handling
-- RRP 
-	- Short gaps are forward-filled only to avoid leakage.
+---
+## Sidenote of this project 
+Although not the focus of this project, Data_collection and Data_cleaning provided the basis for this project to be completed and involved downloading the data from NEM as well as implementing different strategies to maximise memory efficiency. Further notes on this can be found in `Data_pipeline.md`.
+## Strategies Implemented
 
-- TOTALDEMAND
-	- Short gaps are filled using time-based interpolation.
+### Baseline Threshold Policy
+Charges when price is below the 30th percentile of the training distribution and discharges when above the 70th percentile.
 
-Remaining missing values are explicitly dropped.
+This provides a simple but surprisingly effective strategy 
 
-#### 4. Unnatural values filtering
+### Conformal Multi-Horizon Forecast Policy
+Uses quantile regression and conformal prediction to generate calibrated prediction intervals across multiple forecast horizons.
 
-Rows outside of bounds (configurable) are removed, for example:
+Trading decisions are based on expected price movement relative to uncertainty-adjusted thresholds.
 
-- implausible or invalid prices,
-- implausible or invalid demand values.
+---
 
-This is conservative and intended to only remove obvious data errors and not actual market events.
+## Results Summary
 
-#### 5. Time-Based Train / Test Split
+| Policy | Total Profit | Max Drawdown | Equivalent Cycles | Profit per Cycle |
+|------|-------------|-------------|-------------------|------------------|
+| Baseline Threshold | $1639.88 | $89.08 | 127.7 | $12.84 |
+| Conformal Multi-Horizon | $829.92 | $241.30 | 225.2 | $3.66 |
 
-- Splits data chronologically default: 80% train, 20% test
-- Cleaning is applied independently to train and test sets
+Key findings:
 
-#### 6. Feature Engineering
+- Simple threshold policies remain extremely strong baselines
+- Conformal policies introduce a trade-off between selectivity and profitability
+- Uncertainty-aware trading improves decision control but does not guarantee higher raw profit
+- Through changing paramters for conformal policies, profit per cycle can be brought up at the exchange of lowering equivalent cycles, introducing a tradeoff between the 2 
 
-Features are constructed to reflect time-series structure:
+---
 
-- Calendar features
+---
 
-- Cyclical encodings
+## Key Takeaways
 
-- Lag features
+This project demonstrates how uncertainty-aware forecasting can be integrated into decision systems, and highglights the significance of testing against simple strategies which while basic, often prove to be extremely effective.
 
-- Rolling statistics (configurable)
+As a personal takeaway, I also recognised the importance of good project design, having accidentally hyperfocusing on many modules which did not further my goals for this project and remain unused but are still included for user benefit. As such I find that it's important to build a general project pipeline before beginning a project to avoid getting off track.
 
-Lagged features for the test set are generated using train history only ensuring no leakage.
+---
 
-#### 7. Final Outputs
+## Author
 
-The pipeline produces:
+Shoaib Kabir
 
-- CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv
-- CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv
-
-These datasets are:
-- feature-complete,
-- and ready for modelling.
-
-### Modeling
-#### Baseline 
-- ARIMA is used as a baseline for this data to provide a method of comparison to other models that will be used later on. It  performs poorly on the high frequency price data and exhibits convergence issues due to strong intraday seasonality, price spikes, and the engineered features.
-
-These limitations are the source of motivation for the use of feature-based machine learning models in later stages of the project
-
-
-
-
-
-
-#### Quantile Forecast Calibration
-
-- Initial LightGBM quantile models produced reasonable forecasts but exhibited systematic miscalibration:
-
-	- 5% quantile covered only 2.9% of observations
-
-	- 90% prediction intervals covered 93.8% 
-
-- To address this, I implemented a validation-based quantile mapping calibration layer, which:
-
-	- learned empirical bias corrections from a held-out validation set
-
-	- adjusted the lower  and upper quantiles
-
-	- preserved proper out-of-sample evaluation
-
-	Results after calibration:
-
-	- 5% quantile coverage improved from 2.9% → 4.0%
-
-	- 90% interval coverage improved from 93.8% → 91.7%
-
-	mean interval width reduced from 100.8 → 93.1 AUD/MWh
-
-pinball loss remained stable
-### Key highlights 
-
-- No leakage: time order is respected everywhere.
-- Explicit logging: gaps, drops, and assumptions are printed.
-- Modularity: collection, cleaning, and feature engineering are separable.
-
-
-I evaluated against proper baselines and discovered my ML point model does not beat persistence – which led me to focus on probabilistic forecasting instead.
-### Scope & Limitations
-
-This repository does not yet include forecasting models.
-
-Feature choices are generic and meant as a strong baseline.
 

@@ -31,6 +31,26 @@ def plot_cumulative_profit(actions_df: pd.DataFrame, fee_rate: float):
     figure.canvas.mpl_connect("key_press_event", on_key)
     plt.tight_layout()
     plt.show()
+
+
+def plot_cumulative_profit_overlay(action_dfs: list[pd.DataFrame], labels: list[str], fee_rate: float):
+    if len(action_dfs) != len(labels):
+        raise ValueError("action_dfs and labels must have the same length.")
+
+    figure, ax = plt.subplots(figsize=(12, 6))
+    for df, label in zip(action_dfs, labels):
+        work_df = df.copy()
+        work_df["profit"] = work_df["action_kwh"] * work_df["price_kwh"] * (1 - fee_rate)
+        work_df["cumulative_profit"] = work_df["profit"].cumsum()
+        ax.plot(work_df["timestamp"], work_df["cumulative_profit"], label=label)
+
+    ax.set_title("Cumulative Profit Over Time")
+    ax.set_ylabel("Cumulative Profit ($)")
+    ax.grid(True)
+    ax.legend()
+    figure.canvas.mpl_connect("key_press_event", on_key)
+    plt.tight_layout()
+    plt.show()
     
 def plot_battery_soc(actions_df: pd.DataFrame):
     # Plot battery state of charge (SoC) over time
@@ -62,6 +82,28 @@ def plot_drawdown(actions_df: pd.DataFrame):
     plt.tight_layout()
     plt.show(
     )
+
+
+def plot_drawdown_overlay(action_dfs: list[pd.DataFrame], labels: list[str]):
+    if len(action_dfs) != len(labels):
+        raise ValueError("action_dfs and labels must have the same length.")
+
+    figure, ax = plt.subplots(figsize=(12, 6))
+    for df, label in zip(action_dfs, labels):
+        work_df = df.copy()
+        work_df["cumulative_profit"] = work_df["profit"].cumsum()
+        work_df["running_max"] = work_df["cumulative_profit"].cummax()
+        work_df["drawdown"] = work_df["running_max"] - work_df["cumulative_profit"]
+        ax.plot(work_df["timestamp"], work_df["drawdown"], label=label)
+
+    ax.set_title("Drawdown Over Time")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Drawdown ($)")
+    ax.grid(True)
+    ax.legend()
+    figure.canvas.mpl_connect("key_press_event", on_key)
+    plt.tight_layout()
+    plt.show()
 
 def plot_forecast_window(actions_df: pd.DataFrame, forecast_horizon: int):
     # Plot actual vs. forecasted prices for a specific window

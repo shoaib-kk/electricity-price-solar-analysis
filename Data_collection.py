@@ -14,6 +14,7 @@ import pytz
 MELB_TZ = pytz.timezone("Australia/Melbourne")
 
 def should_skip(file_path, temp_path, min_bytes):
+    """Helper function to check if downloading this file can be skipped based on existing file and temp file."""
     if temp_path.exists():
         print(f"Removing stale temp file: {temp_path.name}")
         temp_path.unlink(missing_ok=True)
