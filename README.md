@@ -62,6 +62,16 @@ This project demonstrates how uncertainty-aware forecasting can be integrated in
 As a personal takeaway, I also recognised the importance of good project design, having accidentally hyperfocusing on many modules which did not further my goals for this project and remain unused but are still included for user benefit. As such I find that it's important to build a general project pipeline before beginning a project to avoid getting off track.
 
 ---
+## Things to add
+AEMO API → data pipeline → trained model → prediction API → dashboard
+model saving/loading
+
+FastAPI prediction endpoint
+
+dashboard (Streamlit)
+
+scheduled retraining
+---
 
 ## Author
 
