@@ -47,10 +47,10 @@ Trading decisions are based on expected price movement relative to uncertainty-a
 
 ## Results Summary
 
-| Policy | Total Profit | Max Drawdown | Equivalent Cycles | Profit per Cycle |
-|------|-------------|-------------|-------------------|------------------|
-| Baseline Threshold | $1639.88 | $89.08 | 127.7 | $12.84 |
-| Conformal Multi-Horizon | $829.92 | $241.30 | 225.2 | $3.66 |
+| Policy                  | Total Profit | Max Drawdown | Equivalent Cycles | Profit per Cycle |
+
+| Baseline Threshold      | $1639.88     | $89.08       | 127.7             | $12.84           |
+| Conformal Multi-Horizon | $829.92      | $241.30      | 225.2             | $3.66             |
 
 Key findings:
 
