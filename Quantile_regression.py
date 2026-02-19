@@ -28,8 +28,11 @@ def load_cleaned_datasets():
     train_path = "CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv"
     test_path = "CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv"
 
-    train = pd.read_csv(train_path, parse_dates=["SETTLEMENTDATE"])
-    test = pd.read_csv(test_path, parse_dates=["SETTLEMENTDATE"])
+    train = pd.read_csv(train_path, index_col=0, parse_dates=True)
+    test = pd.read_csv(test_path, index_col=0, parse_dates=True)
+
+    train.index.name = "SETTLEMENTDATE"
+    test.index.name = "SETTLEMENTDATE"
 
     return train, test
 
