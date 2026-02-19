@@ -9,7 +9,7 @@ def shorten_time_increment(df, time_freq: int = 60) -> pd.DataFrame:
         raise ValueError("time_freq must be a multiple of 5.")
     
     df = df.sort_index()
-    df_reduced = df.resample(f"{factor * 5}T").mean()
+    df_reduced = df.resample(f"{factor * 5}min").mean()
     return df_reduced
 
 def time_based_train_test_split(df, test_size: float = 0.2):
@@ -67,7 +67,7 @@ def check_time_index(df, expected_freq_minutes=5):
         full_index = pd.date_range(
             start=df.index.min(),
             end=df.index.max(),
-            freq=f"{expected_freq_minutes}T",
+            freq=f"{expected_freq_minutes}min",
         )
         missing_timestamps = len(full_index) - len(df.index)
         if missing_timestamps > 0:

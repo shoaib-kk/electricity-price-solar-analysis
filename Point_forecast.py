@@ -15,8 +15,11 @@ def load_cleaned_datasets():
     train_path = "CLEANED_PRICE_AND_DEMAND_VIC1_TRAIN.csv"
     test_path = "CLEANED_PRICE_AND_DEMAND_VIC1_TEST.csv"
 
-    train = pd.read_csv(train_path, parse_dates=["SETTLEMENTDATE"])
-    test = pd.read_csv(test_path, parse_dates=["SETTLEMENTDATE"])
+    train = pd.read_csv(train_path, index_col=0, parse_dates=True)
+    test = pd.read_csv(test_path, index_col=0, parse_dates=True)
+
+    train.index.name = "SETTLEMENTDATE"
+    test.index.name = "SETTLEMENTDATE"
 
     return train, test
 def get_feature_columns(train_df, drop_cols):
@@ -41,17 +44,24 @@ def build_feature_matrices(
 
     if "RRP" not in train_df.columns:
         raise ValueError("Expected column 'RRP' in cleaned training data.")
-    if "SETTLEMENTDATE" not in train_df.columns:
-        raise ValueError("Expected 'SETTLEMENTDATE' column in cleaned training data.")
+    if "SETTLEMENTDATE" in train_df.columns:
+        train_df = train_df.copy()
+        test_df = test_df.copy()
+        train_df.sort_values("SETTLEMENTDATE", inplace=True)
+        test_df.sort_values("SETTLEMENTDATE", inplace=True)
+        train_df.set_index("SETTLEMENTDATE", inplace=True)
+        test_df.set_index("SETTLEMENTDATE", inplace=True)
+    elif not isinstance(train_df.index, pd.DatetimeIndex):
+        raise ValueError("Expected 'SETTLEMENTDATE' column or DatetimeIndex in cleaned training data.")
 
     # sort them in-place.
     train_df = train_df.copy()
     test_df = test_df.copy()
-    train_df.sort_values("SETTLEMENTDATE", inplace=True)
-    test_df.sort_values("SETTLEMENTDATE", inplace=True)
+    train_df.sort_index(inplace=True)
+    test_df.sort_index(inplace=True)
 
     # Infer step size in minutes from the training timestamps 
-    step_minutes = time_utils.infer_step_minutes(train_df["SETTLEMENTDATE"], fallback_minutes=5.0)
+    step_minutes = time_utils.infer_step_minutes(train_df.index, fallback_minutes=5.0)
     ratio = horizon_minutes / step_minutes
     horizon_steps = max(1, int(round(ratio)))
 
@@ -111,7 +121,7 @@ def build_feature_matrices(
 
     # For return/direction metrics also need the current price at time t
     current_rrp_test = test_df["RRP"].values
-    test_timestamps = pd.DatetimeIndex(test_df["SETTLEMENTDATE"])
+    test_timestamps = pd.DatetimeIndex(test_df.index)
 
     return (
         X_train,

@@ -12,6 +12,8 @@ from Quantile_regression import (
 
     train_quantile_model,
 )
+from sklearn.metrics import mean_pinball_loss
+import Metrics_utils
 from logging_utils import setup_logging
 import logging
 
@@ -169,6 +171,7 @@ def build_conformal_df_for_horizon(
     y_val: pd.Series,
     X_test_df: pd.DataFrame,
     y_true_test: pd.Series,
+    current_rrp_test: np.ndarray | pd.Series | None = None,
     quantile_low: float = 0.05,
     quantile_high: float = 0.95,
     target_coverage: float = 0.90,
@@ -230,12 +233,22 @@ def build_conformal_df_for_horizon(
         conformal_upper = pd.Series(upper_vals, index=y_true_test.index)
         q_stat_series = pd.Series(q_values, index=y_true_test.index)
 
-    conformal_df = pd.DataFrame({
+    columns = {
         "lower_conformal": conformal_lower,
         "median": q_median_test,
         "upper_conformal": conformal_upper,
         "q_statistic": q_stat_series,
-    })
+        "y_true": y_true_test,
+        "lower_quantile": q_low_test,
+        "upper_quantile": q_high_test,
+        "median_quantile": q_median_test,
+    }
+
+    if current_rrp_test is not None:
+        current_price_series = pd.Series(np.asarray(current_rrp_test), index=y_true_test.index)
+        columns["current_price"] = current_price_series
+
+    conformal_df = pd.DataFrame(columns)
 
     return conformal_df, q_statistic_static
 
@@ -250,6 +263,8 @@ def build_multi_horizon_conformal_forecasts(
     early_stopping_rounds: int = 50,
     rolling_window: int | None = None,
     min_warmup: int = 200,
+    evaluate_metrics: bool = True,
+    move_threshold: float = 1.0,
 ) -> tuple[dict[int, pd.DataFrame], dict[int, float]]:
     """"Build conformal forecasts for multiple horizons and return a dictionary of DataFrames and q statistics indexed by horizon."""
     conformal_dfs = {}
@@ -269,6 +284,7 @@ def build_multi_horizon_conformal_forecasts(
             y_val=y_val,
             X_test_df=X_test_df,
             y_true_test=y_true_test,
+            current_rrp_test=current_rrp_test,
             quantile_low=quantile_low,
             quantile_high=quantile_high,
             target_coverage=target_coverage,
@@ -276,10 +292,86 @@ def build_multi_horizon_conformal_forecasts(
             min_warmup=min_warmup,
         )
 
+        if evaluate_metrics:
+            evaluate_conformal_forecast_metrics(
+                conformal_df,
+                quantile_low=quantile_low,
+                quantile_high=quantile_high,
+                target_coverage=target_coverage,
+                move_threshold=move_threshold,
+                label=f"horizon_{horizon}m",
+            )
+
         conformal_dfs[horizon] = conformal_df
         q_by_horizon[horizon] = q_statistic_static
 
     return conformal_dfs, q_by_horizon
+
+
+def evaluate_conformal_forecast_metrics(
+    conformal_df: pd.DataFrame,
+    *,
+    quantile_low: float = 0.05,
+    quantile_high: float = 0.95,
+    target_coverage: float = 0.90,
+    move_threshold: float = 1.0,
+    label: str = "Conformal model",
+) -> dict:
+    """Compute pinball loss, directional accuracy, and conformal coverage for a forecast table."""
+
+    required_cols = {"y_true", "lower_conformal", "upper_conformal", "median"}
+    missing = required_cols - set(conformal_df.columns)
+    if missing:
+        raise KeyError(f"Missing required columns for evaluation: {sorted(missing)}")
+
+    y_true = np.asarray(conformal_df["y_true"], dtype=float)
+    lower_conf = np.asarray(conformal_df["lower_conformal"], dtype=float)
+    upper_conf = np.asarray(conformal_df["upper_conformal"], dtype=float)
+
+    lower_q = np.asarray(conformal_df.get("lower_quantile", conformal_df["lower_conformal"]), dtype=float)
+    upper_q = np.asarray(conformal_df.get("upper_quantile", conformal_df["upper_conformal"]), dtype=float)
+    median_q = np.asarray(conformal_df.get("median_quantile", conformal_df["median"]), dtype=float)
+
+    pinball_low = float(mean_pinball_loss(y_true, lower_q, alpha=quantile_low))
+    pinball_mid = float(mean_pinball_loss(y_true, median_q, alpha=0.5))
+    pinball_high = float(mean_pinball_loss(y_true, upper_q, alpha=quantile_high))
+
+    coverage = float(np.mean((y_true >= lower_conf) & (y_true <= upper_conf)))
+
+    direction_acc = float("nan")
+    n_eval = 0
+    if "current_price" in conformal_df.columns:
+        direction_acc, n_eval = Metrics_utils.compute_direction_accuracy(
+            y_true=y_true,
+            y_pred=median_q,
+            y_current=np.asarray(conformal_df["current_price"], dtype=float),
+            move_threshold=move_threshold,
+        )
+
+    metrics = {
+        "pinball_low": pinball_low,
+        "pinball_mid": pinball_mid,
+        "pinball_high": pinball_high,
+        "coverage": coverage,
+        "direction_accuracy": direction_acc,
+        "direction_n": n_eval,
+    }
+
+    logger.info(
+        f"[{label}] pinball loss q{quantile_low:.2f}: {pinball_low:.4f}, "
+        f"q0.50: {pinball_mid:.4f}, q{quantile_high:.2f}: {pinball_high:.4f}"
+    )
+    logger.info(
+        f"[{label}] conformal interval coverage: {coverage * 100:.2f}% "
+        f"(target {target_coverage * 100:.0f}%)"
+    )
+    if np.isfinite(direction_acc):
+        logger.info(
+            f"[{label}] directional accuracy (> {move_threshold:.1f} AUD/MWh move): "
+            f"{direction_acc:.2f}% over {n_eval} cases"
+        )
+
+    return metrics
 
 
 def make_aggressive_precomputed_forecast_policy(
@@ -784,16 +876,26 @@ def run_policy(
 
 
 def build_price_series_mwh(test_df: pd.DataFrame) -> pd.Series:
-    if "SETTLEMENTDATE" not in test_df.columns:
-        raise ValueError("Expected 'SETTLEMENTDATE' column in test data.")
-    if "RRP" not in test_df.columns:
+    has_column_dates = "SETTLEMENTDATE" in test_df.columns
+    has_column_rrp = "RRP" in test_df.columns
+
+    if has_column_rrp:
+        values = test_df["RRP"].to_numpy()
+    elif isinstance(test_df.index, pd.DatetimeIndex) and test_df.index.name == "SETTLEMENTDATE" and "RRP" in test_df.columns:
+        values = test_df["RRP"].to_numpy()
+    elif "RRP" in test_df.columns:
+        values = test_df["RRP"].to_numpy()
+    else:
         raise ValueError("Expected 'RRP' column in test data.")
 
-    series_mwh = pd.Series(
-        test_df["RRP"].to_numpy(),
-        index=pd.DatetimeIndex(test_df["SETTLEMENTDATE"]),
-        name="RRP",
-    )
+    if has_column_dates:
+        idx = pd.DatetimeIndex(test_df["SETTLEMENTDATE"])
+    elif isinstance(test_df.index, pd.DatetimeIndex):
+        idx = test_df.index
+    else:
+        raise ValueError("Expected 'SETTLEMENTDATE' column or DatetimeIndex in test data.")
+
+    series_mwh = pd.Series(values, index=idx, name="RRP")
     return _validate_prices(series_mwh)
 
 
