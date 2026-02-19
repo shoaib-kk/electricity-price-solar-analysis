@@ -14,11 +14,19 @@ This project explores whether forecast-based strategies using uncertainty-aware 
 
 The pipeline includes:
 
-- Data collection and cleaning of NEM price data
-- Multi-horizon quantile regression forecasting
-- Conformal prediction interval calibration
-- Battery simulation with realistic constraints and transaction costs
-- Strategy backtesting and performance evaluation
+- automated data ingestion from AEMO 
+
+- cleaning, gap handling, feature engineering 
+
+- exploratory time-series analysis and decomposition 
+
+- baseline ARIMA forecasting and naive models 
+
+- probabilistic forecasting using LightGBM quantile regression and conformal prediction 
+
+- battery simulation with efficiency, capacity, and SOC constraints 
+
+- backtesting and risk analysis including cumulative profit and drawdownn
 
 ---
 ## Sidenote of this project 
